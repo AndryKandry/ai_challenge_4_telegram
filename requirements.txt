@@ -1,0 +1,10 @@
+# Основные зависимости для Telegram бота с Yandex GPT
+
+# Telegram Bot API (версия 20+)
+python-telegram-bot==20.7
+
+# HTTP клиент для асинхронных запросов
+httpx==0.25.2
+
+# Загрузка переменных окружения из .env файла (опционально)
+python-dotenv==1.0.0
