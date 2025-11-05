@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3:*)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(awk:*)",
+      "Bash(for file in bot.py format_manager.py prompts.py test_format_manager.py)",
+      "Bash(do echo -n \"Проверка $file... \")",
+      "Bash(done)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

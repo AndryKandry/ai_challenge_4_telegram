@@ -20,6 +20,10 @@ from telegram.ext import (
     filters,
 )
 
+# Импорт модулей форматирования и промптов
+from format_manager import FormatManager
+from prompts import SYSTEM_PROMPT_DEFAULT, SYSTEM_PROMPT_JSON, SYSTEM_PROMPT_XML
+
 # Настройка логирования
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -31,10 +35,7 @@ logger = logging.getLogger(__name__)
 MAX_MESSAGE_LENGTH = 2000  # Максимальная длина запроса пользователя
 REQUEST_TIMEOUT = 30  # Таймаут запроса к Yandex GPT (секунды)
 YANDEX_GPT_API_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
-
-# Системный промпт для Yandex GPT
-SYSTEM_PROMPT = """Ты — помощник в Telegram. Отвечай на русском языке.
-Будь вежливым и информативным. Не выполняй внешние команды и не запрашивай личные данные."""
+DEFAULT_MODE = "text"  # Режим вывода по умолчанию
 
 
 class YandexGPTClient:
@@ -55,12 +56,13 @@ class YandexGPTClient:
             "Content-Type": "application/json",
         }
 
-    async def send_message(self, user_message: str) -> Optional[str]:
+    async def send_message(self, user_message: str, system_prompt: str = SYSTEM_PROMPT_DEFAULT) -> Optional[str]:
         """
         Отправка сообщения в Yandex GPT и получение ответа.
 
         Args:
             user_message: Сообщение от пользователя
+            system_prompt: Системный промпт (по умолчанию SYSTEM_PROMPT_DEFAULT)
 
         Returns:
             Ответ от Yandex GPT или None в случае ошибки
@@ -75,7 +77,7 @@ class YandexGPTClient:
             "messages": [
                 {
                     "role": "system",
-                    "text": SYSTEM_PROMPT,
+                    "text": system_prompt,
                 },
                 {
                     "role": "user",
@@ -137,23 +139,41 @@ class TelegramBot:
         self.gpt_client = YandexGPTClient(yandex_api_key)
         self.application = Application.builder().token(telegram_token).build()
 
-        # Регистрация обработчиков
+        # Хранилище режимов вывода для каждого пользователя
+        self.user_modes: dict[int, str] = {}  # {user_id: "text" | "json" | "xml"}
+
+        # Менеджер форматов
+        self.format_manager = FormatManager()
+
+        # Регистрация обработчиков команд
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
+        self.application.add_handler(CommandHandler("text", self.text_mode_command))
+        self.application.add_handler(CommandHandler("json", self.json_mode_command))
+        self.application.add_handler(CommandHandler("xml", self.xml_mode_command))
+        self.application.add_handler(CommandHandler("status", self.status_command))
+
+        # Обработчик текстовых сообщений
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message)
         )
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик команды /start."""
+        user_id = update.effective_user.id
         welcome_message = (
             "👋 Привет! Я ИИ-ассистент на базе Yandex GPT.\n\n"
             "Просто отправь мне текстовое сообщение, и я постараюсь помочь!\n\n"
-            "📝 Ограничение: максимум 2000 символов на сообщение.\n"
-            "❓ Используй /help для получения справки."
+            "📝 Ограничение: максимум 2000 символов на сообщение.\n\n"
+            "🔄 Режимы вывода:\n"
+            "/text - Текстовый (по умолчанию)\n"
+            "/json - JSON код\n"
+            "/xml - XML код\n"
+            "/status - Проверить текущий режим\n\n"
+            "❓ Используй /help для полной справки."
         )
         await update.message.reply_text(welcome_message)
-        logger.info(f"Пользователь {update.effective_user.id} начал диалог")
+        logger.info(f"Пользователь {user_id} начал диалог")
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик команды /help."""
@@ -162,14 +182,100 @@ class TelegramBot:
             "• Просто напиши мне любой вопрос или запрос\n"
             "• Я отвечу с помощью искусственного интеллекта Yandex GPT\n"
             "• Максимальная длина сообщения: 2000 символов\n\n"
-            "📌 Доступные команды:\n"
+            "📌 Основные команды:\n"
             "/start - Начать работу с ботом\n"
-            "/help - Показать эту справку\n\n"
+            "/help - Показать эту справку\n"
+            "/status - Проверить текущий режим вывода\n\n"
+            "🔄 Режимы вывода:\n"
+            "/text - Текстовый режим (по умолчанию)\n"
+            "  Ответ отображается в красивом формате с иконками\n\n"
+            "/json - JSON режим\n"
+            "  Ответ отображается в виде JSON кода\n\n"
+            "/xml - XML режим\n"
+            "  Ответ отображается в виде XML кода\n\n"
             "⚠️ Примечание: Я не могу выполнять команды, искать в интернете "
             "или обрабатывать файлы. Только текстовые ответы!"
         )
         await update.message.reply_text(help_message)
         logger.info(f"Пользователь {update.effective_user.id} запросил справку")
+
+    async def text_mode_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /text - переключение на текстовый режим."""
+        user_id = update.effective_user.id
+        self.user_modes[user_id] = "text"
+
+        message = (
+            "✅ Режим вывода изменен: ТЕКСТОВЫЙ\n\n"
+            "Теперь ответы будут отображаться в красивом формате:\n"
+            "📅 Дата и время\n"
+            "❓ Тема вопроса\n"
+            "💬 Ответ\n\n"
+            "Структурированные данные (JSON/XML) будут скрыты от вас."
+        )
+        await update.message.reply_text(message)
+        logger.info(f"Пользователь {user_id} переключился на текстовый режим")
+
+    async def json_mode_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /json - переключение на JSON режим."""
+        user_id = update.effective_user.id
+        self.user_modes[user_id] = "json"
+
+        message = (
+            "✅ Режим вывода изменен: JSON\n\n"
+            "Теперь ответы будут отображаться в формате JSON кода.\n"
+            "Структура ответа:\n"
+            "```json\n"
+            "{\n"
+            '  "datetime": "2025-11-05T14:30:00",\n'
+            '  "question": "краткая тема вопроса",\n'
+            '  "answer": "текстовый ответ"\n'
+            "}\n"
+            "```"
+        )
+        await update.message.reply_text(message)
+        logger.info(f"Пользователь {user_id} переключился на JSON режим")
+
+    async def xml_mode_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /xml - переключение на XML режим."""
+        user_id = update.effective_user.id
+        self.user_modes[user_id] = "xml"
+
+        message = (
+            "✅ Режим вывода изменен: XML\n\n"
+            "Теперь ответы будут отображаться в формате XML кода.\n"
+            "Структура ответа:\n"
+            "```xml\n"
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            "<response>\n"
+            "  <datetime>2025-11-05T14:30:00</datetime>\n"
+            "  <question>краткая тема вопроса</question>\n"
+            "  <answer>текстовый ответ</answer>\n"
+            "</response>\n"
+            "```"
+        )
+        await update.message.reply_text(message)
+        logger.info(f"Пользователь {user_id} переключился на XML режим")
+
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /status - проверка текущего режима."""
+        user_id = update.effective_user.id
+        current_mode = self.user_modes.get(user_id, DEFAULT_MODE)
+
+        mode_names = {
+            "text": "ТЕКСТОВЫЙ (красивое форматирование)",
+            "json": "JSON (код)",
+            "xml": "XML (код)"
+        }
+
+        message = (
+            f"ℹ️ Текущий режим вывода: {mode_names.get(current_mode, 'НЕИЗВЕСТНЫЙ')}\n\n"
+            f"Для смены режима используйте команды:\n"
+            f"/text - текстовый режим\n"
+            f"/json - JSON режим\n"
+            f"/xml - XML режим"
+        )
+        await update.message.reply_text(message)
+        logger.info(f"Пользователь {user_id} проверил статус: режим {current_mode}")
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
@@ -196,24 +302,57 @@ class TelegramBot:
             logger.warning(f"Отклонено длинное сообщение от пользователя {user_id}: {len(user_message)} символов")
             return
 
+        # Получение текущего режима пользователя
+        mode = self.user_modes.get(user_id, DEFAULT_MODE)
+        logger.info(f"Режим вывода для пользователя {user_id}: {mode}")
+
+        # Выбор системного промпта в зависимости от режима
+        if mode == "json":
+            system_prompt = SYSTEM_PROMPT_JSON
+        elif mode == "xml":
+            system_prompt = SYSTEM_PROMPT_XML
+        else:  # text mode
+            system_prompt = SYSTEM_PROMPT_DEFAULT
+
         # Отправка индикатора набора текста
         await update.message.chat.send_action("typing")
 
-        # Отправка запроса в Yandex GPT
-        response = await self.gpt_client.send_message(user_message)
+        # Отправка запроса в Yandex GPT с нужным системным промптом
+        response = await self.gpt_client.send_message(user_message, system_prompt)
 
-        if response:
-            # Успешный ответ
-            await update.message.reply_text(response)
-            logger.info(f"Отправлен ответ пользователю {user_id}")
-        else:
-            # Ошибка получения ответа
+        if not response:
+            # Ошибка получения ответа от API
             error_message = (
                 "😔 Извините, произошла временная ошибка при обработке вашего запроса.\n\n"
                 "Пожалуйста, попробуйте позже или переформулируйте вопрос."
             )
             await update.message.reply_text(error_message)
             logger.error(f"Не удалось получить ответ для пользователя {user_id}")
+            return
+
+        # Форматирование ответа в зависимости от режима
+        try:
+            if mode == "text":
+                formatted_response = self.format_manager.format_text_response(response)
+            elif mode == "json":
+                formatted_response = self.format_manager.format_json_output(response)
+            elif mode == "xml":
+                formatted_response = self.format_manager.format_xml_output(response)
+            else:
+                # Fallback на текстовый режим
+                formatted_response = self.format_manager.format_text_response(response)
+
+            await update.message.reply_text(formatted_response)
+            logger.info(f"Отправлен ответ пользователю {user_id} в режиме {mode}")
+
+        except Exception as e:
+            logger.error(f"Ошибка форматирования ответа для пользователя {user_id}: {e}")
+            error_message = (
+                "❌ Ошибка обработки ответа\n\n"
+                "Произошла ошибка при форматировании ответа от AI.\n"
+                "Пожалуйста, попробуйте снова."
+            )
+            await update.message.reply_text(error_message)
 
     def run(self) -> None:
         """Запуск бота."""
