@@ -21,6 +21,47 @@ class FormatManager:
 
     # ==================== ПАРСИНГ ====================
 
+    def _fix_incomplete_json(self, json_str: str) -> Optional[str]:
+        """
+        Автоматическое исправление незакрытых JSON структур.
+        Добавляет недостающие закрывающие скобки } и ].
+
+        Args:
+            json_str: JSON строка с возможными ошибками
+
+        Returns:
+            Исправленная JSON строка или None
+        """
+        try:
+            # Подсчитываем открывающие и закрывающие скобки
+            open_braces = json_str.count('{')
+            close_braces = json_str.count('}')
+            open_brackets = json_str.count('[')
+            close_brackets = json_str.count(']')
+
+            # Если скобки уже сбалансированы, возвращаем как есть
+            if open_braces == close_braces and open_brackets == close_brackets:
+                return json_str
+
+            # Исправляем: добавляем недостающие закрывающие скобки
+            fixed = json_str
+            missing_braces = open_braces - close_braces
+            missing_brackets = open_brackets - close_brackets
+
+            if missing_braces > 0:
+                self.logger.debug(f"Добавляем {missing_braces} закрывающих фигурных скобок")
+                fixed += '\n' + '}' * missing_braces
+
+            if missing_brackets > 0:
+                self.logger.debug(f"Добавляем {missing_brackets} закрывающих квадратных скобок")
+                fixed += ']' * missing_brackets
+
+            return fixed
+
+        except Exception as e:
+            self.logger.debug(f"Ошибка при исправлении JSON: {e}")
+            return None
+
     def parse_json(self, response: str) -> Optional[dict]:
         """
         Парсинг JSON с обработкой markdown блоков и fallback.
@@ -36,18 +77,40 @@ class FormatManager:
             data = json.loads(response)
             self.logger.info("JSON успешно распарсен напрямую")
             return data
-        except json.JSONDecodeError:
-            self.logger.debug("Прямой парсинг JSON не удался, пробуем извлечь из markdown")
+        except json.JSONDecodeError as e:
+            self.logger.debug(f"Прямой парсинг JSON не удался: {e}, пробуем извлечь из markdown")
 
-        # Попытка 2: Извлечение из markdown блока ```json...```
+        # Попытка 2: Извлечение из markdown блока ```json...``` или ```...```
         try:
-            json_pattern = r'```json\s*\n(.*?)\n```'
+            # Пробуем с указанием языка: ```json
+            # Паттерн поддерживает как ```json\n{...} так и ```json{...} (без переноса строки)
+            json_pattern = r'```json\s*(.*?)```'
             match = re.search(json_pattern, response, re.DOTALL | re.IGNORECASE)
+
+            # Если не нашли, пробуем без указания языка: ```
+            if not match:
+                json_pattern = r'```\s*(.*?)```'
+                match = re.search(json_pattern, response, re.DOTALL | re.IGNORECASE)
+
             if match:
                 json_str = match.group(1).strip()
-                data = json.loads(json_str)
-                self.logger.info("JSON успешно извлечен из markdown блока")
-                return data
+
+                # Попытка парсинга
+                try:
+                    data = json.loads(json_str)
+                    self.logger.info("JSON успешно извлечен из markdown блока")
+                    return data
+                except json.JSONDecodeError as e:
+                    # Если парсинг не удался, пробуем автоматически исправить незакрытые структуры
+                    self.logger.debug(f"Парсинг JSON не удался: {e}, пробуем исправить структуру")
+                    fixed_json = self._fix_incomplete_json(json_str)
+                    if fixed_json:
+                        try:
+                            data = json.loads(fixed_json)
+                            self.logger.info("JSON успешно извлечен после автоматического исправления")
+                            return data
+                        except json.JSONDecodeError:
+                            self.logger.debug("Автоматическое исправление не помогло")
         except (json.JSONDecodeError, AttributeError) as e:
             self.logger.debug(f"Извлечение JSON из markdown не удалось: {e}")
 
@@ -80,7 +143,8 @@ class FormatManager:
 
         # Попытка 2: Извлечение из markdown блока ```xml...```
         try:
-            xml_pattern = r'```xml\s*\n(.*?)\n```'
+            # Паттерн поддерживает как ```xml\n<...> так и ```xml<...> (без переноса строки)
+            xml_pattern = r'```xml\s*(.*?)```'
             match = re.search(xml_pattern, response, re.DOTALL | re.IGNORECASE)
             if match:
                 xml_str = match.group(1).strip()
@@ -101,7 +165,9 @@ class FormatManager:
 
     def extract_structured_from_text(self, text: str) -> Optional[dict]:
         """
-        Fallback парсинг: поиск datetime, question, answer в тексте через regex.
+        Fallback парсинг: поиск полей в тексте через regex.
+        Поддерживает как старый формат (datetime, question, answer),
+        так и новый формат Joker (datetime, message_type, relevant_count, collected_info, answer).
 
         Args:
             text: Исходный текст с данными
@@ -110,7 +176,28 @@ class FormatManager:
             Словарь с извлеченными данными или None
         """
         try:
-            # Паттерны для поиска полей
+            # Попытка 1: Очистка от возможных префиксов и суффиксов
+            # Ищем JSON между первой { и последней }
+            json_match = re.search(r'\{.*\}', text, re.DOTALL)
+            if json_match:
+                potential_json = json_match.group(0)
+                try:
+                    # Пробуем распарсить найденный JSON
+                    data = json.loads(potential_json)
+                    self.logger.info("JSON успешно извлечён через fallback (поиск {...})")
+
+                    # Проверяем, что это валидный JSON с нужными полями
+                    # Для Joker формата: требуем наличие message_type или answer
+                    # Для старого формата: требуем datetime, question, answer
+                    if "message_type" in data or ("answer" in data and "datetime" in data):
+                        return data
+                    else:
+                        self.logger.debug(f"Fallback: найден JSON, но отсутствуют ожидаемые поля")
+
+                except json.JSONDecodeError as e:
+                    self.logger.debug(f"Fallback: не удалось распарсить найденный блок {...}: {e}")
+
+            # Попытка 2: Паттерны для старого формата (TEXT, JSON, XML)
             datetime_pattern = r'"?datetime"?\s*[:\>]\s*"?([0-9T:\-\.]+)"?'
             question_pattern = r'"?question"?\s*[:\>]\s*"?([^"<\n]+)"?'
             answer_pattern = r'"?answer"?\s*[:\>]\s*"?(.+?)(?="?[\}\<]|$)'
@@ -125,7 +212,7 @@ class FormatManager:
                     'question': question_match.group(1).strip(),
                     'answer': answer_match.group(1).strip().strip('"'),
                 }
-                self.logger.info("Данные успешно извлечены через fallback парсинг")
+                self.logger.info("Данные успешно извлечены через fallback парсинг (старый формат)")
                 return data
             else:
                 self.logger.error("Не удалось найти все обязательные поля в тексте")
@@ -303,3 +390,95 @@ class FormatManager:
                 "❌ Ошибка форматирования XML\n\n"
                 "Не удалось отформатировать XML для вывода."
             )
+
+    def format_joker_response(self, response: str) -> str:
+        """
+        Форматирование ответа для режима Joker (генератор анекдотов).
+        Парсит JSON и возвращает красиво отформатированное сообщение.
+
+        Args:
+            response: Сырой ответ от Yandex GPT (JSON строка)
+
+        Returns:
+            Отформатированное текстовое сообщение для режима Joker
+        """
+        data = self.parse_json(response)
+
+        if not data:
+            self.logger.error("Не удалось распарсить ответ в режиме Joker")
+            return (
+                "❌ Ошибка обработки ответа\n\n"
+                "Не удалось распарсить ответ от AI.\n"
+                "Пожалуйста, попробуйте снова или используйте /newjoke для начала нового анекдота."
+            )
+
+        return self._format_joker_from_dict(data)
+
+    def _format_joker_from_dict(self, data: dict) -> str:
+        """
+        Форматирование ответа Joker из уже распарсенного словаря.
+
+        Args:
+            data: Распарсенный JSON ответ от Yandex GPT
+
+        Returns:
+            Отформатированное текстовое сообщение для режима Joker
+        """
+        # Извлекаем основные поля
+        message_type = data.get("message_type", "collecting")
+        answer = data.get("answer", "")
+        collected_info = data.get("collected_info", {})
+
+        # Формируем статус собранной информации
+        def format_collected_info(info):
+            """Форматирование статуса собранной информации."""
+            lines = []
+            has_characters = info.get("characters") not in [None, ""]
+            has_situation = info.get("situation") not in [None, ""]
+            has_location = info.get("location") not in [None, ""]
+
+            # Персонажи
+            if has_characters:
+                lines.append(f"✓ Персонажи: {info['characters']}")
+            else:
+                lines.append("○ Персонажи: не указаны")
+
+            # Ситуация
+            if has_situation:
+                lines.append(f"✓ Ситуация: {info['situation']}")
+            else:
+                lines.append("○ Ситуация: не указана")
+
+            # Место
+            if has_location:
+                lines.append(f"✓ Место: {info['location']}")
+            else:
+                lines.append("○ Место: не указано")
+
+            return "\n".join(lines)
+
+        # Формируем сообщение в зависимости от типа
+        if message_type == "joke":
+            # Анекдот сгенерирован
+            formatted_message = (
+                f"🎭 АНЕКДОТ ГОТОВ!\n\n"
+                f"{answer}\n\n"
+                f"😄 Понравилось? Используй /newjoke чтобы создать ещё один анекдот!"
+            )
+        elif message_type == "redirecting":
+            # Возврат к теме
+            info_status = format_collected_info(collected_info)
+            formatted_message = (
+                f"↩️ ВОЗВРАТ К ТЕМЕ\n\n"
+                f"{answer}\n\n"
+                f"📋 Собрано:\n{info_status}"
+            )
+        else:  # collecting
+            # Сбор информации
+            info_status = format_collected_info(collected_info)
+            formatted_message = (
+                f"💬 {answer}\n\n"
+                f"📋 Собрано:\n{info_status}"
+            )
+
+        return formatted_message
