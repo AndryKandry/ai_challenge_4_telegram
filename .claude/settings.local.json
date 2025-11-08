@@ -6,7 +6,9 @@
       "Bash(awk:*)",
       "Bash(for file in bot.py format_manager.py prompts.py test_format_manager.py)",
       "Bash(do echo -n \"Проверка $file... \")",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(for file in format_manager.py prompts.py reasoning_prompts.py reasoning_comparator.py)",
+      "Bash(for file in bot.py reasoning_comparator.py reasoning_prompts.py)"
     ],
     "deny": [],
     "ask": []

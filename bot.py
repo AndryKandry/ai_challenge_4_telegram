@@ -11,31 +11,45 @@ import sys
 from typing import Optional
 
 import httpx
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    CallbackQueryHandler,
+    ConversationHandler,
     filters,
 )
 
 # Импорт модулей форматирования и промптов
 from format_manager import FormatManager
 from prompts import SYSTEM_PROMPT_DEFAULT, SYSTEM_PROMPT_JSON, SYSTEM_PROMPT_XML
+from reasoning_comparator import ReasoningComparator
 
 # Настройка логирования
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    level=logging.INFO,  # Возвращаем INFO после отладки
 )
 logger = logging.getLogger(__name__)
+
+# Ограничиваем подробность httpx логов
+logging.getLogger("httpx").setLevel(logging.INFO)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+# Включаем DEBUG для ConversationHandler чтобы видеть состояния
+logging.getLogger("telegram.ext.ConversationHandler").setLevel(logging.DEBUG)
 
 # Константы
 MAX_MESSAGE_LENGTH = 2000  # Максимальная длина запроса пользователя
 REQUEST_TIMEOUT = 30  # Таймаут запроса к Yandex GPT (секунды)
 YANDEX_GPT_API_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 DEFAULT_MODE = "text"  # Режим вывода по умолчанию
+
+# Состояния для ConversationHandler
+CHOOSING_TASK = 0  # Выбор задачи через inline кнопки
+WAITING_FOR_CUSTOM_TASK = 1  # Ожидание ввода пользовательской задачи
 
 
 class YandexGPTClient:
@@ -137,7 +151,15 @@ class TelegramBot:
             yandex_api_key: API ключ Yandex Cloud
         """
         self.gpt_client = YandexGPTClient(yandex_api_key)
-        self.application = Application.builder().token(telegram_token).build()
+        # Увеличиваем таймауты для надежности
+        self.application = (
+            Application.builder()
+            .token(telegram_token)
+            .connect_timeout(30.0)
+            .read_timeout(30.0)
+            .write_timeout(30.0)
+            .build()
+        )
 
         # Хранилище режимов вывода для каждого пользователя
         self.user_modes: dict[int, str] = {}  # {user_id: "text" | "json" | "xml"}
@@ -153,10 +175,36 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("xml", self.xml_mode_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
 
-        # Обработчик текстовых сообщений
-        self.application.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message)
+        # ConversationHandler для /compare_reasoning с выбором задачи
+        comparison_handler = ConversationHandler(
+            entry_points=[CommandHandler("compare_reasoning", self.compare_reasoning_start)],
+            states={
+                # Состояние 0: Ожидание выбора задачи через callback
+                CHOOSING_TASK: [
+                    CallbackQueryHandler(self.handle_callback, pattern="^task_")
+                ],
+                # Состояние 1: Ожидание ввода пользовательской задачи
+                WAITING_FOR_CUSTOM_TASK: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.receive_custom_task)
+                ],
+            },
+            fallbacks=[CommandHandler("cancel", self.cancel_comparison)],
+            per_message=False,  # Не отслеживать состояние по сообщению
+            # НЕ указываем per_chat и per_user - используем значения по умолчанию
+            # per_chat=True (default), per_user=True (default)
+            # Ключ состояния: (user_id, chat_id)
         )
+        # Добавляем с group=0 для более высокого приоритета
+        self.application.add_handler(comparison_handler, group=0)
+
+        # Обработчик текстовых сообщений (группа 1 - меньший приоритет)
+        self.application.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message),
+            group=1
+        )
+
+        # Добавляем обработчик ошибок
+        self.application.add_error_handler(self.error_handler)
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик команды /start."""
@@ -170,6 +218,13 @@ class TelegramBot:
             "/json - JSON код\n"
             "/xml - XML код\n"
             "/status - Проверить текущий режим\n\n"
+            "🔬 Сравнение стратегий рассуждения:\n"
+            "/compare_reasoning - Протестируй 4 подхода к решению задачи:\n"
+            "  • Прямой ответ\n"
+            "  • Пошаговое решение\n"
+            "  • Мета-промптинг\n"
+            "  • Группа экспертов\n"
+            "Выбери встроенную задачу или введи свою!\n\n"
             "❓ Используй /help для полной справки."
         )
         await update.message.reply_text(welcome_message)
@@ -185,7 +240,8 @@ class TelegramBot:
             "📌 Основные команды:\n"
             "/start - Начать работу с ботом\n"
             "/help - Показать эту справку\n"
-            "/status - Проверить текущий режим вывода\n\n"
+            "/status - Проверить текущий режим вывода\n"
+            "/compare_reasoning - Сравнение 4 стратегий рассуждения\n\n"
             "🔄 Режимы вывода:\n"
             "/text - Текстовый режим (по умолчанию)\n"
             "  Ответ отображается в красивом формате с иконками\n\n"
@@ -193,6 +249,12 @@ class TelegramBot:
             "  Ответ отображается в виде JSON кода\n\n"
             "/xml - XML режим\n"
             "  Ответ отображается в виде XML кода\n\n"
+            "🔬 Сравнение стратегий:\n"
+            "/compare_reasoning - Демонстрация 4 подходов к решению логической задачи:\n"
+            "  1. Прямой ответ\n"
+            "  2. Пошаговое решение\n"
+            "  3. Мета-промптинг\n"
+            "  4. Группа экспертов\n\n"
             "⚠️ Примечание: Я не могу выполнять команды, искать в интернете "
             "или обрабатывать файлы. Только текстовые ответы!"
         )
@@ -277,6 +339,233 @@ class TelegramBot:
         await update.message.reply_text(message)
         logger.info(f"Пользователь {user_id} проверил статус: режим {current_mode}")
 
+    async def compare_reasoning_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """
+        Начало диалога для /compare_reasoning - предлагает выбор задачи.
+
+        Returns:
+            Состояние ConversationHandler или ConversationHandler.END
+        """
+        user_id = update.effective_user.id
+        logger.info(f"Пользователь {user_id} запустил сравнение стратегий рассуждения")
+
+        # Создаем клавиатуру с кнопками выбора
+        keyboard = [
+            [InlineKeyboardButton("📝 Встроенная задача (о переправе)", callback_data="task_default")],
+            [InlineKeyboardButton("✍️ Ввести свою задачу", callback_data="task_custom")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Отправляем сообщение с выбором
+        message = (
+            "🔬 Сравнение стратегий рассуждения\n\n"
+            "Выберите задачу для тестирования 4 различных подходов:\n\n"
+            "1️⃣ Прямой ответ\n"
+            "2️⃣ Пошаговое решение\n"
+            "3️⃣ Мета-промптинг\n"
+            "4️⃣ Группа экспертов\n\n"
+            "Какую задачу использовать?"
+        )
+
+        # Попытка отправить сообщение с retry при таймауте
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                await update.message.reply_text(message, reply_markup=reply_markup)
+                break
+            except Exception as e:
+                logger.warning(f"Попытка {attempt + 1}/{max_retries} не удалась: {e}")
+                if attempt == max_retries - 1:
+                    # Последняя попытка не удалась
+                    logger.error(f"Не удалось отправить меню выбора задачи после {max_retries} попыток")
+                    await update.message.reply_text(
+                        "❌ Произошла ошибка соединения.\n\n"
+                        "Пожалуйста, попробуйте снова через несколько секунд."
+                    )
+                    return ConversationHandler.END
+                await asyncio.sleep(1)  # Небольшая задержка перед повтором
+
+        # Переходим в состояние ожидания выбора задачи
+        logger.info(f"=== COMPARE_REASONING_START: Возвращаем состояние CHOOSING_TASK ({CHOOSING_TASK})")
+        return CHOOSING_TASK
+
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
+        """
+        Обработчик нажатий на inline-кнопки.
+
+        Returns:
+            Состояние ConversationHandler или None
+        """
+        query = update.callback_query
+        await query.answer()
+
+        logger.info(f"=== HANDLE_CALLBACK: Получен callback с данными: {query.data}")
+
+        if query.data == "task_default":
+            # Используем встроенную задачу
+            await query.edit_message_text(
+                "✅ Выбрана встроенная задача о переправе через реку.\n\n"
+                "⏳ Запускаю сравнение подходов..."
+            )
+            # Запускаем сравнение с дефолтной задачей
+            await self.run_comparison(update, context, custom_task=None)
+            return ConversationHandler.END
+
+        elif query.data == "task_custom":
+            # Запрашиваем пользовательскую задачу
+            await query.edit_message_text(
+                "✍️ Введите вашу задачу для тестирования.\n\n"
+                "Опишите логическую задачу, головоломку или вопрос, "
+                "который требует рассуждения.\n\n"
+                "Для отмены используйте /cancel"
+            )
+            # Явно сохраняем состояние в context (на случай если ConversationHandler не обновляет)
+            context.user_data['conversation_state'] = WAITING_FOR_CUSTOM_TASK
+            logger.info(f"=== HANDLE_CALLBACK: Возвращаем состояние WAITING_FOR_CUSTOM_TASK ({WAITING_FOR_CUSTOM_TASK})")
+            logger.info(f"=== HANDLE_CALLBACK: Явно сохранили состояние в context.user_data")
+            return WAITING_FOR_CUSTOM_TASK
+
+        logger.info("=== HANDLE_CALLBACK: Возвращаем None")
+        return None
+
+    async def receive_custom_task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """
+        Получение пользовательской задачи и запуск сравнения.
+
+        Returns:
+            ConversationHandler.END
+        """
+        user_id = update.effective_user.id
+        custom_task = update.message.text
+
+        logger.info(f"=== RECEIVE_CUSTOM_TASK: Пользователь {user_id} ввел пользовательскую задачу: {custom_task[:50]}...")
+
+        # Проверка длины задачи
+        if len(custom_task) > MAX_MESSAGE_LENGTH:
+            await update.message.reply_text(
+                f"❌ Задача слишком длинная!\n\n"
+                f"Текущая длина: {len(custom_task)} символов\n"
+                f"Максимум: {MAX_MESSAGE_LENGTH} символов\n\n"
+                f"Пожалуйста, сократите задачу и попробуйте снова с /compare_reasoning"
+            )
+            return ConversationHandler.END
+
+        # Подтверждение получения задачи
+        await update.message.reply_text(
+            "✅ Задача получена!\n\n"
+            "⏳ Запускаю сравнение 4 подходов к решению..."
+        )
+
+        # Запускаем сравнение с пользовательской задачей
+        await self.run_comparison(update, context, custom_task=custom_task)
+
+        return ConversationHandler.END
+
+    async def cancel_comparison(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """
+        Отмена процесса сравнения.
+
+        Returns:
+            ConversationHandler.END
+        """
+        await update.message.reply_text(
+            "❌ Сравнение отменено.\n\n"
+            "Для нового запуска используйте /compare_reasoning"
+        )
+        return ConversationHandler.END
+
+    async def run_comparison(self, update, context: ContextTypes.DEFAULT_TYPE, custom_task: Optional[str] = None) -> None:
+        """
+        Выполнение сравнения 4 подходов к решению задачи.
+
+        Args:
+            update: Update объект
+            context: Контекст выполнения
+            custom_task: Пользовательская задача (если None, используется дефолтная)
+        """
+        # Определяем, откуда пришел вызов (callback или message)
+        if update.callback_query:
+            # Вызов из callback
+            chat = update.callback_query.message.chat
+            user_id = update.callback_query.from_user.id
+        else:
+            # Вызов из обычного сообщения
+            chat = update.message.chat
+            user_id = update.effective_user.id
+
+        await chat.send_action("typing")
+
+        try:
+            # Создаем экземпляр компаратора с пользовательской или дефолтной задачей
+            comparator = ReasoningComparator(self.gpt_client, custom_task=custom_task)
+
+            # Отправляем уведомления о прогрессе
+            progress_message = await chat.send_message("🔄 Выполняется подход 1 из 4...")
+
+            # Функция для обновления прогресса
+            async def update_progress(current: int, total: int):
+                try:
+                    await progress_message.edit_text(f"🔄 Выполняется подход {current} из {total}...")
+                except Exception as e:
+                    logger.warning(f"Не удалось обновить сообщение о прогрессе: {e}")
+
+            # Запускаем сравнение всех подходов с callback для обновления прогресса
+            results = await comparator.compare_all_approaches(progress_callback=update_progress)
+
+            # Обновляем прогресс
+            await progress_message.edit_text("✅ Все подходы выполнены! Формирую отчет...")
+
+            # Форматируем отчет
+            full_report = comparator.format_comparison_report(results)
+
+            # Разбиваем отчет на части для Telegram (лимит 4096 символов на сообщение)
+            max_length = 4000  # Оставляем запас
+            report_parts = []
+
+            if len(full_report) <= max_length:
+                report_parts.append(full_report)
+            else:
+                # Разбиваем по разделителям подходов
+                sections = full_report.split("=" * 60)
+                current_part = ""
+
+                for section in sections:
+                    if len(current_part) + len(section) + 60 < max_length:
+                        current_part += "=" * 60 + section
+                    else:
+                        if current_part:
+                            report_parts.append(current_part)
+                        current_part = "=" * 60 + section
+
+                if current_part:
+                    report_parts.append(current_part)
+
+            # Удаляем сообщение о прогрессе
+            await progress_message.delete()
+
+            # Отправляем все части отчета
+            for i, part in enumerate(report_parts, 1):
+                if len(report_parts) > 1:
+                    header = f"📊 Часть {i}/{len(report_parts)}\n\n"
+                    await chat.send_message(header + part)
+                else:
+                    await chat.send_message(part)
+
+                # Небольшая задержка между сообщениями
+                if i < len(report_parts):
+                    await asyncio.sleep(0.5)
+
+            logger.info(f"Сравнение стратегий завершено для пользователя {user_id}")
+
+        except Exception as e:
+            logger.error(f"Ошибка при сравнении стратегий для пользователя {user_id}: {e}", exc_info=True)
+            error_message = (
+                "❌ Произошла ошибка при выполнении сравнения\n\n"
+                f"Детали: {str(e)}\n\n"
+                "Пожалуйста, попробуйте позже или обратитесь к администратору."
+            )
+            await chat.send_message(error_message)
+
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         Обработчик текстовых сообщений от пользователя.
@@ -288,7 +577,8 @@ class TelegramBot:
         user_message = update.message.text
         user_id = update.effective_user.id
 
-        logger.info(f"Получено сообщение от пользователя {user_id}: {user_message[:50]}...")
+        logger.info(f"=== HANDLE_MESSAGE: Получено сообщение от пользователя {user_id}: {user_message[:50]}...")
+        logger.info(f"=== HANDLE_MESSAGE: ConversationHandler должен был обработать это, если состояние активно")
 
         # Проверка длины сообщения
         if len(user_message) > MAX_MESSAGE_LENGTH:
@@ -353,6 +643,27 @@ class TelegramBot:
                 "Пожалуйста, попробуйте снова."
             )
             await update.message.reply_text(error_message)
+
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Обработчик ошибок для всего приложения.
+
+        Args:
+            update: Update объект, который вызвал ошибку
+            context: Контекст с информацией об ошибке
+        """
+        logger.error(f"Произошла ошибка: {context.error}", exc_info=context.error)
+
+        # Пытаемся отправить сообщение пользователю, если это возможно
+        if update and isinstance(update, Update):
+            try:
+                if update.effective_message:
+                    await update.effective_message.reply_text(
+                        "❌ Произошла ошибка при обработке вашего запроса.\n\n"
+                        "Пожалуйста, попробуйте позже или используйте /start для перезапуска."
+                    )
+            except Exception as e:
+                logger.error(f"Не удалось отправить сообщение об ошибке пользователю: {e}")
 
     def run(self) -> None:
         """Запуск бота."""

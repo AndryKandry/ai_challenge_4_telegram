@@ -39,10 +39,17 @@ class FormatManager:
         except json.JSONDecodeError:
             self.logger.debug("Прямой парсинг JSON не удался, пробуем извлечь из markdown")
 
-        # Попытка 2: Извлечение из markdown блока ```json...```
+        # Попытка 2: Извлечение из markdown блока ```json...``` или ```...```
         try:
+            # Сначала пробуем ```json
             json_pattern = r'```json\s*\n(.*?)\n```'
             match = re.search(json_pattern, response, re.DOTALL | re.IGNORECASE)
+
+            # Если не нашли, пробуем просто ```
+            if not match:
+                json_pattern = r'```\s*\n(.*?)\n```'
+                match = re.search(json_pattern, response, re.DOTALL | re.IGNORECASE)
+
             if match:
                 json_str = match.group(1).strip()
                 data = json.loads(json_str)
@@ -140,6 +147,7 @@ class FormatManager:
     def validate_response(self, data: dict) -> bool:
         """
         Проверка обязательных полей и формата данных.
+        Автоматически подставляет текущую дату, если datetime пустой.
 
         Args:
             data: Словарь с данными для валидации
@@ -151,14 +159,22 @@ class FormatManager:
             self.logger.error("Валидация не прошла: данные отсутствуют")
             return False
 
-        # Проверка наличия всех обязательных полей
-        required_fields = ['datetime', 'question', 'answer']
+        # Проверка наличия ключей (но datetime может быть пустым)
+        if 'datetime' not in data:
+            self.logger.warning("Поле 'datetime' отсутствует, добавляю текущую дату")
+            data['datetime'] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        elif not data['datetime'] or data['datetime'].strip() == "":
+            self.logger.warning("Поле 'datetime' пустое, подставляю текущую дату")
+            data['datetime'] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+        # Проверка обязательных полей question и answer
+        required_fields = ['question', 'answer']
         for field in required_fields:
             if field not in data or not data[field]:
                 self.logger.error(f"Валидация не прошла: отсутствует поле '{field}'")
                 return False
 
-        # Проверка формата datetime
+        # Проверка формата datetime (уже гарантированно заполнено)
         if not self.validate_datetime(data['datetime']):
             self.logger.warning(f"Datetime '{data['datetime']}' не соответствует ISO 8601, но продолжаем")
             # Не возвращаем False, т.к. это не критично
@@ -207,6 +223,8 @@ class FormatManager:
         Returns:
             Отформатированное текстовое сообщение
         """
+        self.logger.debug(f"format_text_response получил ответ длиной {len(response)} символов")
+
         # Сначала пробуем JSON
         data = self.parse_json(response)
 
