@@ -23,6 +23,7 @@ from telegram.ext import (
 # Импорт модулей форматирования и промптов
 from format_manager import FormatManager
 from prompts import SYSTEM_PROMPT_DEFAULT, SYSTEM_PROMPT_JSON, SYSTEM_PROMPT_XML
+from temperature_tester import TemperatureTester
 
 # Настройка логирования
 logging.basicConfig(
@@ -145,6 +146,9 @@ class TelegramBot:
         # Менеджер форматов
         self.format_manager = FormatManager()
 
+        # Тестер температуры
+        self.temperature_tester = TemperatureTester(yandex_api_key)
+
         # Регистрация обработчиков команд
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
@@ -152,6 +156,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("json", self.json_mode_command))
         self.application.add_handler(CommandHandler("xml", self.xml_mode_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
+        self.application.add_handler(CommandHandler("test_temperature", self.test_temperature_command))
 
         # Обработчик текстовых сообщений
         self.application.add_handler(
@@ -170,6 +175,8 @@ class TelegramBot:
             "/json - JSON код\n"
             "/xml - XML код\n"
             "/status - Проверить текущий режим\n\n"
+            "🧪 Тестирование:\n"
+            "/test_temperature - Сравнить работу LLM при разных температурах\n\n"
             "❓ Используй /help для полной справки."
         )
         await update.message.reply_text(welcome_message)
@@ -193,6 +200,13 @@ class TelegramBot:
             "  Ответ отображается в виде JSON кода\n\n"
             "/xml - XML режим\n"
             "  Ответ отображается в виде XML кода\n\n"
+            "🧪 Тестирование температуры LLM:\n"
+            "/test_temperature - Тест с дефолтным промптом\n"
+            "/test_temperature <промпт> - Тест с вашим промптом\n\n"
+            "Температура влияет на креативность и предсказуемость ответов:\n"
+            "• 0.0 = детерминированность (точные ответы)\n"
+            "• 0.7 = баланс (универсальный режим)\n"
+            "• 1.0 = креативность (оригинальные идеи)\n\n"
             "⚠️ Примечание: Я не могу выполнять команды, искать в интернете "
             "или обрабатывать файлы. Только текстовые ответы!"
         )
@@ -276,6 +290,95 @@ class TelegramBot:
         )
         await update.message.reply_text(message)
         logger.info(f"Пользователь {user_id} проверил статус: режим {current_mode}")
+
+    async def test_temperature_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Обработчик команды /test_temperature - тестирование разных температур LLM.
+
+        Использование:
+            /test_temperature - использовать дефолтный промпт
+            /test_temperature <ваш промпт> - использовать кастомный промпт
+        """
+        user_id = update.effective_user.id
+        logger.info(f"Пользователь {user_id} запустил тестирование температуры")
+
+        # Получение промпта из аргументов команды
+        if context.args:
+            user_prompt = " ".join(context.args)
+        else:
+            user_prompt = None  # Будет использован дефолтный промпт
+
+        # Уведомление о начале тестирования
+        await update.message.reply_text(
+            "🧪 Запускаю тестирование температуры LLM...\n\n"
+            "Отправляю запросы с тремя разными значениями температуры:\n"
+            "• 0.0 (детерминированность)\n"
+            "• 0.7 (сбалансированность)\n"
+            "• 1.0 (креативность)\n\n"
+            "⏳ Это может занять 10-30 секунд..."
+        )
+
+        # Отправка индикатора набора текста
+        await update.message.chat.send_action("typing")
+
+        try:
+            # Запуск тестирования
+            results = await self.temperature_tester.test_temperatures(user_prompt)
+
+            # Форматирование и отправка результатов
+            formatted_output = self.temperature_tester.format_test_results(results)
+
+            # Отправка может быть длинной, разбиваем на части если нужно
+            max_length = 4096  # Ограничение Telegram
+            if len(formatted_output) <= max_length:
+                await update.message.reply_text(formatted_output)
+            else:
+                # Разбиваем на части по разделителям
+                parts = self._split_long_message(formatted_output, max_length)
+                for part in parts:
+                    await update.message.reply_text(part)
+                    await asyncio.sleep(0.5)  # Небольшая задержка между частями
+
+            logger.info(f"Тестирование температуры завершено для пользователя {user_id}")
+
+        except Exception as e:
+            logger.error(f"Ошибка при тестировании температуры для пользователя {user_id}: {e}", exc_info=True)
+            error_message = (
+                "❌ Произошла ошибка при тестировании температуры.\n\n"
+                "Пожалуйста, попробуйте позже или обратитесь к администратору."
+            )
+            await update.message.reply_text(error_message)
+
+    def _split_long_message(self, message: str, max_length: int) -> list[str]:
+        """
+        Разбивает длинное сообщение на части по разделителям.
+
+        Args:
+            message: Исходное сообщение
+            max_length: Максимальная длина части
+
+        Returns:
+            Список частей сообщения
+        """
+        if len(message) <= max_length:
+            return [message]
+
+        parts = []
+        current_part = ""
+        lines = message.split("\n")
+
+        for line in lines:
+            if len(current_part) + len(line) + 1 <= max_length:
+                current_part += line + "\n"
+            else:
+                if current_part:
+                    parts.append(current_part.rstrip())
+                current_part = line + "\n"
+
+        if current_part:
+            parts.append(current_part.rstrip())
+
+        return parts
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
