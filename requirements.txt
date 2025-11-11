@@ -8,3 +8,6 @@ httpx==0.25.2
 
 # Загрузка переменных окружения из .env файла (опционально)
 python-dotenv==1.0.0
+
+# HuggingFace API для работы с LLM моделями
+huggingface-hub>=1.1.0

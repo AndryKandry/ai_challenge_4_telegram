@@ -24,6 +24,7 @@ from telegram.ext import (
 from format_manager import FormatManager
 from prompts import SYSTEM_PROMPT_DEFAULT, SYSTEM_PROMPT_JSON, SYSTEM_PROMPT_XML
 from temperature_tester import TemperatureTester
+from huggingface_client import HuggingFaceClient
 
 # Настройка логирования
 logging.basicConfig(
@@ -149,6 +150,14 @@ class TelegramBot:
         # Тестер температуры
         self.temperature_tester = TemperatureTester(yandex_api_key)
 
+        # HuggingFace клиент (опционально, если есть API ключ)
+        try:
+            self.hf_client = HuggingFaceClient()
+            logger.info("HuggingFace клиент инициализирован")
+        except Exception as e:
+            logger.warning(f"HuggingFace клиент недоступен: {e}")
+            self.hf_client = None
+
         # Регистрация обработчиков команд
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
@@ -157,6 +166,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("xml", self.xml_mode_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
         self.application.add_handler(CommandHandler("test_temperature", self.test_temperature_command))
+        self.application.add_handler(CommandHandler("compare_hf", self.compare_hf_models_command))
 
         # Обработчик текстовых сообщений
         self.application.add_handler(
@@ -176,7 +186,8 @@ class TelegramBot:
             "/xml - XML код\n"
             "/status - Проверить текущий режим\n\n"
             "🧪 Тестирование:\n"
-            "/test_temperature - Сравнить работу LLM при разных температурах\n\n"
+            "/test_temperature - Сравнить работу LLM при разных температурах\n"
+            "/compare_hf - Сравнить HuggingFace модели (интерактивно)\n\n"
             "❓ Используй /help для полной справки."
         )
         await update.message.reply_text(welcome_message)
@@ -207,6 +218,13 @@ class TelegramBot:
             "• 0.0 = детерминированность (точные ответы)\n"
             "• 0.7 = баланс (универсальный режим)\n"
             "• 1.0 = креативность (оригинальные идеи)\n\n"
+            "🤖 Сравнение LLM моделей:\n"
+            "/compare_hf - Тест с дефолтным промптом\n"
+            "/compare_hf <промпт> - Тест с вашим промптом\n\n"
+            "Сравниваются 3 модели в реальном времени:\n"
+            "• Qwen 2.5 7B (HuggingFace, 7.61B параметров)\n"
+            "• Llama 3.2 3B (HuggingFace, 3.21B параметров)\n"
+            "• Yandex GPT Lite (Yandex Cloud)\n\n"
             "⚠️ Примечание: Я не могу выполнять команды, искать в интернете "
             "или обрабатывать файлы. Только текстовые ответы!"
         )
@@ -348,6 +366,250 @@ class TelegramBot:
                 "Пожалуйста, попробуйте позже или обратитесь к администратору."
             )
             await update.message.reply_text(error_message)
+
+    async def compare_hf_models_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Обработчик команды /compare_hf - интерактивное сравнение LLM моделей.
+
+        Сравниваются 3 модели:
+        - Qwen 2.5 7B (HuggingFace)
+        - Llama 3.2 3B (HuggingFace)
+        - Yandex GPT Lite (Yandex Cloud)
+
+        Использование:
+            /compare_hf - использовать дефолтный промпт
+            /compare_hf <ваш промпт> - использовать кастомный промпт
+        """
+        user_id = update.effective_user.id
+        logger.info(f"Пользователь {user_id} запустил сравнение LLM моделей")
+
+        # Проверка доступности HuggingFace клиента
+        if not self.hf_client:
+            error_message = (
+                "❌ HuggingFace API недоступен\n\n"
+                "Для использования этой функции необходимо:\n"
+                "1. Получить токен на https://huggingface.co/settings/tokens\n"
+                "2. Добавить HUGGINGFACE_API_KEY в .env файл\n"
+                "3. Перезапустить бота\n\n"
+                "Подробнее: см. документацию в docs/huggingface_integration.md"
+            )
+            await update.message.reply_text(error_message)
+            return
+
+        # Получение промпта из аргументов команды
+        if context.args:
+            user_prompt = " ".join(context.args)
+        else:
+            user_prompt = "Объясни простыми словами, что такое квантовая запутанность"
+
+        # Создание начального сообщения с прогрессом
+        progress_message = await update.message.reply_text(
+            "🤖 **СРАВНЕНИЕ LLM МОДЕЛЕЙ**\n\n"
+            f"📝 Промпт: _{user_prompt}_\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "⏳ Подготовка...",
+            parse_mode="Markdown"
+        )
+
+        try:
+            # Отправка индикатора набора текста
+            await update.message.chat.send_action("typing")
+
+            # Обновление: начинаем тестирование первой модели
+            await progress_message.edit_text(
+                "🤖 **СРАВНЕНИЕ LLM МОДЕЛЕЙ**\n\n"
+                f"📝 Промпт: _{user_prompt}_\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "🔄 Тестирование Qwen 2.5 7B...\n"
+                "⏸️ Ожидание: Llama 3.2 3B\n"
+                "⏸️ Ожидание: Yandex GPT",
+                parse_mode="Markdown"
+            )
+
+            # Тестирование первой модели
+            metrics_qwen = await asyncio.to_thread(
+                self.hf_client.generate_response,
+                "qwen",
+                user_prompt,
+                max_tokens=400,
+                temperature=0.7
+            )
+
+            # Обновление: первая модель готова, начинаем вторую
+            await progress_message.edit_text(
+                "🤖 **СРАВНЕНИЕ LLM МОДЕЛЕЙ**\n\n"
+                f"📝 Промпт: _{user_prompt}_\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"✅ Qwen 2.5 7B: {metrics_qwen.execution_time:.2f}с\n"
+                "🔄 Тестирование Llama 3.2 3B...\n"
+                "⏸️ Ожидание: Yandex GPT",
+                parse_mode="Markdown"
+            )
+
+            await update.message.chat.send_action("typing")
+
+            # Тестирование второй модели
+            metrics_llama = await asyncio.to_thread(
+                self.hf_client.generate_response,
+                "llama",
+                user_prompt,
+                max_tokens=400,
+                temperature=0.7
+            )
+
+            # Обновление: вторая модель готова, начинаем третью
+            await progress_message.edit_text(
+                "🤖 **СРАВНЕНИЕ LLM МОДЕЛЕЙ**\n\n"
+                f"📝 Промпт: _{user_prompt}_\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"✅ Qwen 2.5 7B: {metrics_qwen.execution_time:.2f}с\n"
+                f"✅ Llama 3.2 3B: {metrics_llama.execution_time:.2f}с\n"
+                "🔄 Тестирование Yandex GPT...",
+                parse_mode="Markdown"
+            )
+
+            await update.message.chat.send_action("typing")
+
+            # Тестирование Yandex GPT
+            import time
+            start_time = time.time()
+            yandex_response = await self.gpt_client.send_message(user_prompt)
+            yandex_time = time.time() - start_time
+
+            # Подсчет токенов для Yandex GPT (приблизительно)
+            yandex_input_tokens = len(user_prompt) // 4
+            yandex_output_tokens = len(yandex_response) // 4 if yandex_response else 0
+            yandex_total_tokens = yandex_input_tokens + yandex_output_tokens
+
+            # Обновление: все модели готовы
+            await progress_message.edit_text(
+                "🤖 **СРАВНЕНИЕ LLM МОДЕЛЕЙ**\n\n"
+                f"📝 Промпт: _{user_prompt}_\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"✅ Qwen 2.5 7B: {metrics_qwen.execution_time:.2f}с\n"
+                f"✅ Llama 3.2 3B: {metrics_llama.execution_time:.2f}с\n"
+                f"✅ Yandex GPT: {yandex_time:.2f}с\n\n"
+                "📊 Формирование результатов...",
+                parse_mode="Markdown"
+            )
+
+            await asyncio.sleep(0.5)
+
+            # Формирование итогового отчета
+            report = self._format_comparison_report(
+                metrics_qwen,
+                metrics_llama,
+                yandex_response,
+                yandex_time,
+                yandex_input_tokens,
+                yandex_output_tokens,
+                yandex_total_tokens,
+                user_prompt
+            )
+
+            # Удаление прогресс-сообщения
+            await progress_message.delete()
+
+            # Отправка результатов (может быть в нескольких сообщениях)
+            max_length = 4096
+            if len(report) <= max_length:
+                await update.message.reply_text(report)
+            else:
+                parts = self._split_long_message(report, max_length)
+                for part in parts:
+                    await update.message.reply_text(part)
+                    await asyncio.sleep(0.5)
+
+            logger.info(f"Сравнение HuggingFace моделей завершено для пользователя {user_id}")
+
+        except Exception as e:
+            logger.error(f"Ошибка при сравнении HuggingFace моделей для пользователя {user_id}: {e}", exc_info=True)
+
+            # Удаляем прогресс-сообщение при ошибке
+            try:
+                await progress_message.delete()
+            except:
+                pass
+
+            error_message = (
+                "❌ Произошла ошибка при сравнении моделей.\n\n"
+                f"Детали: {str(e)[:200]}\n\n"
+                "Пожалуйста, попробуйте позже или проверьте настройки API."
+            )
+            await update.message.reply_text(error_message)
+
+    def _format_comparison_report(self, metrics_qwen, metrics_llama, yandex_response,
+                                   yandex_time, yandex_input_tokens, yandex_output_tokens,
+                                   yandex_total_tokens, prompt: str) -> str:
+        """
+        Форматирование отчета сравнения LLM моделей.
+
+        Args:
+            metrics_qwen: Метрики Qwen модели
+            metrics_llama: Метрики Llama модели
+            yandex_response: Ответ от Yandex GPT
+            yandex_time: Время выполнения Yandex GPT
+            yandex_input_tokens: Входные токены Yandex
+            yandex_output_tokens: Выходные токены Yandex
+            yandex_total_tokens: Всего токенов Yandex
+            prompt: Промпт для тестирования
+
+        Returns:
+            Отформатированный отчет
+        """
+        # Определение самой быстрой модели
+        times = {
+            "Qwen 2.5 7B": metrics_qwen.execution_time,
+            "Llama 3.2 3B": metrics_llama.execution_time,
+            "Yandex GPT": yandex_time
+        }
+        fastest_model = min(times, key=times.get)
+
+        # Определение самой детальной модели
+        tokens = {
+            "Qwen 2.5 7B": metrics_qwen.output_tokens,
+            "Llama 3.2 3B": metrics_llama.output_tokens,
+            "Yandex GPT": yandex_output_tokens
+        }
+        most_detailed_model = max(tokens, key=tokens.get)
+
+        report = (
+            "🤖 **РЕЗУЛЬТАТЫ СРАВНЕНИЯ LLM МОДЕЛЕЙ**\n\n"
+            f"📝 Промпт: _{prompt[:80]}{'...' if len(prompt) > 80 else ''}_\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📊 **МЕТРИКИ**\n\n"
+            f"**1️⃣ Qwen 2.5 7B** (HuggingFace, 7.61B)\n"
+            f"https://huggingface.co/Qwen/Qwen2.5-7B-Instruct\n"
+            f"⏱️ Время: {metrics_qwen.execution_time:.2f}с\n"
+            f"📊 Токены: {metrics_qwen.input_tokens} → {metrics_qwen.output_tokens} ({metrics_qwen.total_tokens})\n"
+            f"💰 {metrics_qwen.cost}\n\n"
+            f"**2️⃣ Llama 3.2 3B** (HuggingFace, 3.21B)\n"
+            f"https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct\n"
+            f"⏱️ Время: {metrics_llama.execution_time:.2f}с\n"
+            f"📊 Токены: {metrics_llama.input_tokens} → {metrics_llama.output_tokens} ({metrics_llama.total_tokens})\n"
+            f"💰 {metrics_llama.cost}\n\n"
+            f"**3️⃣ Yandex GPT Lite** (Yandex Cloud)\n"
+            f"⏱️ Время: {yandex_time:.2f}с\n"
+            f"📊 Токены: {yandex_input_tokens} → {yandex_output_tokens} ({yandex_total_tokens})\n"
+            f"💰 По тарифу Yandex Cloud\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🏆 **ВЫВОДЫ**\n\n"
+            f"⚡ Самая быстрая: **{fastest_model}** ({times[fastest_model]:.2f}с)\n"
+            f"📝 Самая детальная: **{most_detailed_model}** ({tokens[most_detailed_model]} токенов)\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "💬 **ОТВЕТ: QWEN 2.5 7B**\n\n"
+            f"{metrics_qwen.response[:500]}{'...' if len(metrics_qwen.response) > 500 else ''}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "💬 **ОТВЕТ: LLAMA 3.2 3B**\n\n"
+            f"{metrics_llama.response[:500]}{'...' if len(metrics_llama.response) > 500 else ''}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "💬 **ОТВЕТ: YANDEX GPT**\n\n"
+            f"{yandex_response[:500] if yandex_response else 'Ошибка получения ответа'}{'...' if yandex_response and len(yandex_response) > 500 else ''}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📚 Детали: docs/llm_comparison_results.md"
+        )
+
+        return report
 
     def _split_long_message(self, message: str, max_length: int) -> list[str]:
         """
