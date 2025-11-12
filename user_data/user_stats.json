@@ -1,0 +1,16 @@
+{
+  "393559696": {
+    "user_id": 393559696,
+    "session_requests": 13,
+    "session_tokens": 9395,
+    "session_request_tokens": 4540,
+    "session_response_tokens": 4855,
+    "daily_requests": 7,
+    "daily_tokens": 8208,
+    "daily_request_tokens": 4228,
+    "daily_response_tokens": 3980,
+    "last_reset": "2025-11-13T00:00:03.855521",
+    "last_request_tokens": 400,
+    "last_response_tokens": 204
+  }
+}
