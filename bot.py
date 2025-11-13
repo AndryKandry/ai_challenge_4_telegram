@@ -37,6 +37,9 @@ from error_handlers import check_token_limit_before_request, handle_token_overfl
 from user_settings import UserDataManager
 from token_limit_tester import TokenLimitTester
 
+# Импорт модулей компрессии диалога
+from dialog_compressor import DialogCompressor, DialogHistory
+
 # Настройка логирования
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -167,6 +170,10 @@ class TelegramBot:
         self.token_command_handler = TokenCommandHandler(self.user_manager)
         self.token_limit_tester = TokenLimitTester(self.gpt_client, self.token_counter)
 
+        # Система компрессии диалога
+        self.dialog_compressor = DialogCompressor(yandex_api_key, self.token_counter)
+        self.user_histories: dict[int, DialogHistory] = {}  # {user_id: DialogHistory}
+
         # Регистрация обработчиков команд
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
@@ -184,10 +191,28 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("token_help", self.token_help_command))
         self.application.add_handler(CommandHandler("test_tokens", self.test_tokens_command))
 
+        # Регистрация команды компрессии диалога
+        self.application.add_handler(CommandHandler("compact", self.compact_command))
+
         # Обработчик текстовых сообщений
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message)
         )
+
+    def _get_or_create_history(self, user_id: int) -> DialogHistory:
+        """
+        Получить или создать историю диалога для пользователя.
+
+        Args:
+            user_id: ID пользователя
+
+        Returns:
+            История диалога пользователя
+        """
+        if user_id not in self.user_histories:
+            self.user_histories[user_id] = DialogHistory()
+            logger.info(f"Created new dialog history for user {user_id}")
+        return self.user_histories[user_id]
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик команды /start."""
@@ -201,6 +226,8 @@ class TelegramBot:
             "/json - JSON код\n"
             "/xml - XML код\n"
             "/status - Проверить текущий режим\n\n"
+            "🗜️ Оптимизация:\n"
+            "/compact - Сжать ВСЮ историю в резюме (экономия токенов)\n\n"
             "🧪 Тестирование:\n"
             "/test_temperature - Сравнить работу LLM при разных температурах\n"
             "/test_tokens - Демо: запросы разного размера и токены\n\n"
@@ -234,6 +261,11 @@ class TelegramBot:
             "/token_settings - Настройки отображения токенов\n"
             "/token_help - Справка о токенах\n"
             "/test_tokens - Демо: тест разных размеров запросов\n\n"
+            "🗜️ Оптимизация токенов:\n"
+            "/compact - Сжать ВСЮ историю диалога в краткое резюме\n"
+            "  • Создаёт резюме из ВСЕХ предыдущих сообщений\n"
+            "  • Автокомпрессия: при 50 сообщениях (сохраняет 10 последних)\n"
+            "  • Экономия: 30-50% токенов при длительных диалогах\n\n"
             "🧪 Тестирование температуры LLM:\n"
             "/test_temperature - Тест с дефолтным промптом\n"
             "/test_temperature <промпт> - Тест с вашим промптом\n\n"
@@ -460,6 +492,86 @@ class TelegramBot:
             )
             await update.message.reply_text(error_message)
 
+    async def compact_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Обработчик команды /compact - ручная компрессия ВСЕЙ истории диалога.
+        Создает резюме из ВСЕХ предыдущих сообщений, не сохраняя ни одного.
+        """
+        user_id = update.effective_user.id
+        logger.info(f"User {user_id} requested manual compression of ALL messages")
+
+        # Получить историю пользователя
+        history = self._get_or_create_history(user_id)
+
+        # Проверить, есть ли что сжимать
+        if history.get_message_count() < 2:
+            await update.message.reply_text(
+                "ℹ️ История диалога слишком короткая для компрессии.\n\n"
+                "Необходимо минимум 2 сообщения для выполнения компрессии."
+            )
+            return
+
+        # Уведомление о начале компрессии
+        await update.message.reply_text(
+            "🗜️ Начинаю компрессию ВСЕЙ истории диалога...\n\n"
+            "Все предыдущие сообщения будут заменены на краткое резюме.\n"
+            "⏳ Это может занять несколько секунд..."
+        )
+
+        # Отправка индикатора набора текста
+        await update.message.chat.send_action("typing")
+
+        try:
+            # Выполнить компрессию ВСЕХ сообщений (keep_last_n=0)
+            success, result, stats = await self.dialog_compressor.compress_history(history, keep_last_n=0)
+
+            if success:
+                # Компрессия успешна - показываем статистику и резюме
+                stats_message = self.dialog_compressor.get_compression_stats_message(stats)
+                await update.message.reply_text(stats_message)
+
+                # Показать резюме пользователю
+                if history.compressed_context:
+                    # Извлечь только резюме из сжатого контекста (без маркеров)
+                    compressed_text = history.compressed_context
+                    # Убираем маркеры [COMPRESSED CONTEXT] и [/COMPRESSED CONTEXT]
+                    summary_text = compressed_text.replace("[COMPRESSED CONTEXT]", "").replace("[/COMPRESSED CONTEXT]", "").strip()
+
+                    # Убираем заголовок "Резюме предыдущего диалога:" если есть
+                    if summary_text.startswith("Резюме предыдущего диалога:"):
+                        summary_text = summary_text.replace("Резюме предыдущего диалога:", "", 1).strip()
+
+                    summary_message = f"📋 Резюме вашего диалога:\n\n{summary_text}"
+
+                    # Разбиваем на части если слишком длинное
+                    max_length = 4096  # Лимит Telegram
+                    if len(summary_message) <= max_length:
+                        await update.message.reply_text(summary_message)
+                    else:
+                        parts = self._split_long_message(summary_message, max_length)
+                        for part in parts:
+                            await update.message.reply_text(part)
+                            await asyncio.sleep(0.3)
+
+                logger.info(f"Manual compression (all messages) completed for user {user_id}: {stats}")
+            else:
+                # Ошибка компрессии
+                error_message = (
+                    f"❌ Ошибка при компрессии истории\n\n"
+                    f"Причина: {result}\n\n"
+                    f"Попробуйте позже или обратитесь к администратору."
+                )
+                await update.message.reply_text(error_message)
+                logger.error(f"Manual compression failed for user {user_id}: {result}")
+
+        except Exception as e:
+            logger.error(f"Unexpected error during manual compression for user {user_id}: {e}", exc_info=True)
+            error_message = (
+                "❌ Произошла неожиданная ошибка при компрессии истории.\n\n"
+                "Пожалуйста, попробуйте позже."
+            )
+            await update.message.reply_text(error_message)
+
     def _split_long_message(self, message: str, max_length: int) -> list[str]:
         """
         Разбивает длинное сообщение на части по разделителям.
@@ -504,9 +616,45 @@ class TelegramBot:
 
         logger.info(f"Получено сообщение от пользователя {user_id}: {user_message[:50]}...")
 
+        # Получить историю диалога пользователя
+        history = self._get_or_create_history(user_id)
+
         # Подсчет токенов в запросе пользователя
         request_tokens = self.token_counter.count_tokens(user_message)
         logger.info(f"Токены запроса пользователя {user_id}: {request_tokens}")
+
+        # Проверка необходимости автоматической компрессии
+        should_compress, reason = self.dialog_compressor.should_compress(history)
+        if should_compress:
+            logger.info(f"Auto-compression triggered for user {user_id}: {reason}")
+
+            # Уведомить пользователя о компрессии
+            compression_notice = (
+                "🗜️ История диалога достигла лимита. Выполняю автоматическую компрессию...\n"
+                "⏳ Секунду..."
+            )
+            notice_msg = await update.message.reply_text(compression_notice)
+
+            try:
+                # Выполнить автоматическую компрессию
+                success, result, stats = await self.dialog_compressor.compress_history(history)
+
+                if success:
+                    # Удалить уведомление и показать статистику
+                    await notice_msg.delete()
+                    stats_message = (
+                        f"✅ Автоматическая компрессия выполнена\n"
+                        f"📊 Сэкономлено: {stats.get('savings', 0)}% токенов\n"
+                    )
+                    await update.message.reply_text(stats_message)
+                    logger.info(f"Auto-compression completed for user {user_id}: {stats}")
+                else:
+                    # Компрессия не удалась, но продолжаем работу
+                    await notice_msg.delete()
+                    logger.warning(f"Auto-compression failed for user {user_id}: {result}")
+            except Exception as e:
+                logger.error(f"Error during auto-compression for user {user_id}: {e}", exc_info=True)
+                # Продолжаем работу даже если компрессия не удалась
 
         # Проверка лимита токенов - показываем предупреждение, но отправляем запрос
         is_within_limit, error_msg = check_token_limit_before_request(request_tokens)
@@ -546,6 +694,10 @@ class TelegramBot:
         else:  # text mode
             system_prompt = SYSTEM_PROMPT_DEFAULT
 
+        # Установить системный промпт в историю (если еще не установлен)
+        if history.system_prompt is None:
+            history.set_system_prompt(system_prompt)
+
         # Отправка индикатора набора текста
         await update.message.chat.send_action("typing")
 
@@ -565,6 +717,11 @@ class TelegramBot:
         # Подсчет токенов в ответе
         response_tokens = self.token_counter.count_tokens(response)
         logger.info(f"Токены ответа для пользователя {user_id}: {response_tokens}")
+
+        # Сохранение сообщений в историю диалога
+        history.add_message("user", user_message)
+        history.add_message("assistant", response)
+        logger.debug(f"Saved messages to history for user {user_id}, total messages: {history.get_message_count()}")
 
         # Обновление статистики пользователя
         stats = self.user_manager.get_stats(user_id)

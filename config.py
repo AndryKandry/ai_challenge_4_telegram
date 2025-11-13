@@ -161,6 +161,30 @@ def should_show_warning(percentage: float) -> bool:
     return percentage >= TOKEN_WARNING_THRESHOLD
 
 
+# ==================== НАСТРОЙКИ КОМПРЕССИИ ДИАЛОГА ====================
+
+# Включить механизм компрессии истории диалога
+COMPRESSION_ENABLED: Final[bool] = True
+
+# Автоматическая компрессия при достижении лимитов
+COMPRESSION_AUTO_COMPRESS: Final[bool] = True
+
+# Максимальное количество сообщений до автокомпрессии
+COMPRESSION_MAX_MESSAGES: Final[int] = 50
+
+# Максимальный процент использования токенов до автокомпрессии (0.0 - 1.0)
+COMPRESSION_MAX_TOKENS_PERCENT: Final[float] = 0.85  # 85% от лимита
+
+# Количество последних сообщений для сохранения без компрессии
+COMPRESSION_KEEP_RECENT_MESSAGES: Final[int] = 10
+
+# Целевое соотношение компрессии (0.0 - 1.0, где 0.2 = 20% от исходного размера)
+COMPRESSION_RATIO_TARGET: Final[float] = 0.2
+
+# Путь к промпту для компрессии
+COMPRESSION_PROMPT_PATH: Final[str] = "prompts/compression_summary.txt"
+
+
 # ==================== ЭКСПОРТ КОНФИГУРАЦИИ ====================
 
 __all__ = [
@@ -218,4 +242,13 @@ __all__ = [
     "get_model_token_limit",
     "get_token_indicator",
     "should_show_warning",
+
+    # Компрессия
+    "COMPRESSION_ENABLED",
+    "COMPRESSION_AUTO_COMPRESS",
+    "COMPRESSION_MAX_MESSAGES",
+    "COMPRESSION_MAX_TOKENS_PERCENT",
+    "COMPRESSION_KEEP_RECENT_MESSAGES",
+    "COMPRESSION_RATIO_TARGET",
+    "COMPRESSION_PROMPT_PATH",
 ]
