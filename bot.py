@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from typing import Optional
 
 import httpx
@@ -24,6 +25,7 @@ from telegram.ext import (
 from format_manager import FormatManager
 from prompts import SYSTEM_PROMPT_DEFAULT, SYSTEM_PROMPT_JSON, SYSTEM_PROMPT_XML
 from temperature_tester import TemperatureTester
+from database import MemoryManager
 
 # Настройка логирования
 logging.basicConfig(
@@ -59,7 +61,7 @@ class YandexGPTClient:
 
     async def send_message(self, user_message: str, system_prompt: str = SYSTEM_PROMPT_DEFAULT) -> Optional[str]:
         """
-        Отправка сообщения в Yandex GPT и получение ответа.
+        Отправка сообщения в Yandex GPT и получение ответа (без контекста).
 
         Args:
             user_message: Сообщение от пользователя
@@ -68,6 +70,50 @@ class YandexGPTClient:
         Returns:
             Ответ от Yandex GPT или None в случае ошибки
         """
+        return await self.send_message_with_history(user_message, system_prompt, [])
+
+    async def send_message_with_history(
+        self,
+        user_message: str,
+        system_prompt: str = SYSTEM_PROMPT_DEFAULT,
+        conversation_history: list = None
+    ) -> Optional[str]:
+        """
+        Отправка сообщения в Yandex GPT с учётом истории диалога.
+
+        Args:
+            user_message: Сообщение от пользователя
+            system_prompt: Системный промпт
+            conversation_history: История диалога (список словарей с полями message_text и message_type)
+
+        Returns:
+            Ответ от Yandex GPT или None в случае ошибки
+        """
+        if conversation_history is None:
+            conversation_history = []
+
+        # Формируем список сообщений для API
+        messages = [
+            {
+                "role": "system",
+                "text": system_prompt,
+            }
+        ]
+
+        # Добавляем историю диалога
+        for msg in conversation_history:
+            role = "user" if msg["message_type"] == "user" else "assistant"
+            messages.append({
+                "role": role,
+                "text": msg["message_text"]
+            })
+
+        # Добавляем текущее сообщение пользователя
+        messages.append({
+            "role": "user",
+            "text": user_message,
+        })
+
         payload = {
             "modelUri": f"gpt://{os.getenv('YANDEX_FOLDER_ID', 'folder_id')}/yandexgpt-lite",
             "completionOptions": {
@@ -75,16 +121,7 @@ class YandexGPTClient:
                 "temperature": 0.9,
                 "maxTokens": 2000,
             },
-            "messages": [
-                {
-                    "role": "system",
-                    "text": system_prompt,
-                },
-                {
-                    "role": "user",
-                    "text": user_message,
-                },
-            ],
+            "messages": messages,
         }
 
         try:
@@ -149,6 +186,11 @@ class TelegramBot:
         # Тестер температуры
         self.temperature_tester = TemperatureTester(yandex_api_key)
 
+        # Менеджер долговременной памяти
+        self.memory = MemoryManager("agent_memory.db")
+        self.memory.create_tables()
+        logger.info("Система памяти инициализирована")
+
         # Регистрация обработчиков команд
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
@@ -157,6 +199,16 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("xml", self.xml_mode_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
         self.application.add_handler(CommandHandler("test_temperature", self.test_temperature_command))
+
+        # Команды управления памятью
+        self.application.add_handler(CommandHandler("memory_stats", self.memory_stats_command))
+        self.application.add_handler(CommandHandler("clear_memory", self.clear_memory_command))
+        self.application.add_handler(CommandHandler("export_memory", self.export_memory_command))
+
+        # Команды управления сессиями
+        self.application.add_handler(CommandHandler("new_session", self.new_session_command))
+        self.application.add_handler(CommandHandler("end_session", self.end_session_command))
+        self.application.add_handler(CommandHandler("session_info", self.session_info_command))
 
         # Обработчик текстовых сообщений
         self.application.add_handler(
@@ -169,12 +221,17 @@ class TelegramBot:
         welcome_message = (
             "👋 Привет! Я ИИ-ассистент на базе Yandex GPT.\n\n"
             "Просто отправь мне текстовое сообщение, и я постараюсь помочь!\n\n"
+            "💡 Я помню контекст диалога в рамках сессии!\n"
             "📝 Ограничение: максимум 2000 символов на сообщение.\n\n"
             "🔄 Режимы вывода:\n"
             "/text - Текстовый (по умолчанию)\n"
             "/json - JSON код\n"
             "/xml - XML код\n"
             "/status - Проверить текущий режим\n\n"
+            "💾 Управление сессиями:\n"
+            "/session_info - Информация о текущей сессии\n"
+            "/new_session - Начать новую сессию\n"
+            "/end_session - Завершить текущую сессию\n\n"
             "🧪 Тестирование:\n"
             "/test_temperature - Сравнить работу LLM при разных температурах\n\n"
             "❓ Используй /help для полной справки."
@@ -188,11 +245,20 @@ class TelegramBot:
             "🤖 Справка по использованию бота:\n\n"
             "• Просто напиши мне любой вопрос или запрос\n"
             "• Я отвечу с помощью искусственного интеллекта Yandex GPT\n"
+            "• Я помню контекст разговора в рамках текущей сессии! 💡\n"
             "• Максимальная длина сообщения: 2000 символов\n\n"
             "📌 Основные команды:\n"
             "/start - Начать работу с ботом\n"
             "/help - Показать эту справку\n"
             "/status - Проверить текущий режим вывода\n\n"
+            "💾 Управление сессиями:\n"
+            "/session_info - Информация о текущей сессии\n"
+            "/new_session - Начать новую сессию (очистить контекст)\n"
+            "/end_session - Завершить текущую сессию\n\n"
+            "📊 Управление памятью:\n"
+            "/memory_stats - Статистика памяти\n"
+            "/clear_memory - Очистить всю историю диалога\n"
+            "/export_memory - Экспорт истории в файл (text/json/csv)\n\n"
             "🔄 Режимы вывода:\n"
             "/text - Текстовый режим (по умолчанию)\n"
             "  Ответ отображается в красивом формате с иконками\n\n"
@@ -207,6 +273,11 @@ class TelegramBot:
             "• 0.0 = детерминированность (точные ответы)\n"
             "• 0.7 = баланс (универсальный режим)\n"
             "• 1.0 = креативность (оригинальные идеи)\n\n"
+            "💡 Как работают сессии:\n"
+            "• Сессия автоматически создается при первом сообщении\n"
+            "• Бот помнит последние 10 сообщений из текущей сессии\n"
+            "• Используйте /new_session для начала нового диалога\n"
+            "• Используйте /end_session для сброса контекста\n\n"
             "⚠️ Примечание: Я не могу выполнять команды, искать в интернете "
             "или обрабатывать файлы. Только текстовые ответы!"
         )
@@ -390,6 +461,7 @@ class TelegramBot:
         """
         user_message = update.message.text
         user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
 
         logger.info(f"Получено сообщение от пользователя {user_id}: {user_message[:50]}...")
 
@@ -404,6 +476,29 @@ class TelegramBot:
             await update.message.reply_text(error_message)
             logger.warning(f"Отклонено длинное сообщение от пользователя {user_id}: {len(user_message)} символов")
             return
+
+        # Получение или создание активной сессии
+        session_id = self.memory.get_active_session(user_id, chat_id)
+        if not session_id:
+            session_id = self.memory.create_session(user_id, chat_id)
+            logger.info(f"Создана новая сессия {session_id} для пользователя {user_id}")
+
+        # Сохранение сообщения пользователя в БД
+        start_time = time.time()
+        try:
+            self.memory.save_message(user_id, chat_id, user_message, "user", session_id)
+            logger.debug(f"Сообщение пользователя {user_id} сохранено в БД")
+        except Exception as e:
+            logger.error(f"Ошибка сохранения сообщения пользователя: {e}")
+
+        # Получение истории диалога для контекста (только сообщения из текущей сессии)
+        conversation_history = self.memory.get_conversation_history(
+            user_id, chat_id, limit=10, session_id=session_id
+        )
+
+        # Исключаем текущее сообщение из истории (оно ещё не сохранено)
+        # История содержит предыдущие сообщения сессии
+        logger.info(f"Загружено {len(conversation_history)} сообщений из истории сессии {session_id}")
 
         # Получение текущего режима пользователя
         mode = self.user_modes.get(user_id, DEFAULT_MODE)
@@ -420,8 +515,25 @@ class TelegramBot:
         # Отправка индикатора набора текста
         await update.message.chat.send_action("typing")
 
-        # Отправка запроса в Yandex GPT с нужным системным промптом
-        response = await self.gpt_client.send_message(user_message, system_prompt)
+        # Отправка запроса в Yandex GPT с контекстом истории диалога
+        response = await self.gpt_client.send_message_with_history(
+            user_message, system_prompt, conversation_history
+        )
+
+        # Логирование действия агента
+        execution_time = int((time.time() - start_time) * 1000)
+        try:
+            self.memory.save_action(
+                user_id=user_id,
+                chat_id=chat_id,
+                action_type="gpt_request",
+                description="Запрос к Yandex GPT API",
+                input_data={"message": user_message[:100], "mode": mode},
+                output_data={"response_received": response is not None},
+                execution_time=execution_time
+            )
+        except Exception as e:
+            logger.error(f"Ошибка сохранения действия агента: {e}")
 
         if not response:
             # Ошибка получения ответа от API
@@ -432,6 +544,13 @@ class TelegramBot:
             await update.message.reply_text(error_message)
             logger.error(f"Не удалось получить ответ для пользователя {user_id}")
             return
+
+        # Сохранение ответа ассистента в БД
+        try:
+            self.memory.save_message(user_id, chat_id, response, "assistant", session_id)
+            logger.debug(f"Ответ ассистента для пользователя {user_id} сохранен в БД")
+        except Exception as e:
+            logger.error(f"Ошибка сохранения ответа ассистента: {e}")
 
         # Форматирование ответа в зависимости от режима
         try:
@@ -454,6 +573,307 @@ class TelegramBot:
                 "❌ Ошибка обработки ответа\n\n"
                 "Произошла ошибка при форматировании ответа от AI.\n"
                 "Пожалуйста, попробуйте снова."
+            )
+            await update.message.reply_text(error_message)
+
+    async def memory_stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /memory_stats - показать статистику памяти."""
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+
+        logger.info(f"Пользователь {user_id} запросил статистику памяти")
+
+        try:
+            # Получаем персональную статистику пользователя
+            stats = self.memory.get_statistics(user_id=user_id)
+
+            message = (
+                "📊 Статистика вашей памяти:\n\n"
+                f"💬 Сообщений: {stats.get('messages_count', 0)}\n"
+                f"📋 Промежуточных результатов: {stats.get('intermediate_results_count', 0)}\n"
+                f"⚡ Действий агента: {stats.get('actions_count', 0)}\n"
+                f"🧠 Фактов в базе знаний: {stats.get('knowledge_count', 0)}\n"
+                f"🔄 Активных сессий: {stats.get('active_sessions', 0)}\n\n"
+                "Используйте /clear_memory для очистки истории\n"
+                "Используйте /export_memory для экспорта данных"
+            )
+
+            await update.message.reply_text(message)
+
+        except Exception as e:
+            logger.error(f"Ошибка при получении статистики для пользователя {user_id}: {e}")
+            error_message = (
+                "❌ Ошибка получения статистики\n\n"
+                "Произошла ошибка при обращении к базе данных."
+            )
+            await update.message.reply_text(error_message)
+
+    async def clear_memory_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /clear_memory - очистить историю диалога."""
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+
+        logger.info(f"Пользователь {user_id} запросил очистку памяти")
+
+        # Проверяем, есть ли подтверждение
+        if context.args and len(context.args) > 0 and context.args[0].lower() == 'confirm':
+            try:
+                # Выполняем очистку
+                success = self.memory.clear_user_history(user_id, chat_id)
+
+                if success:
+                    # Завершаем активную сессию
+                    active_session = self.memory.get_active_session(user_id, chat_id)
+                    if active_session:
+                        self.memory.end_session(active_session)
+
+                    message = (
+                        "✅ История диалога успешно очищена!\n\n"
+                        "Все ваши сообщения и ответы ассистента были удалены из базы данных.\n"
+                        "Вы можете начать новый диалог."
+                    )
+                    logger.info(f"История очищена для пользователя {user_id}")
+                else:
+                    message = "❌ Ошибка при очистке истории. Попробуйте позже."
+
+                await update.message.reply_text(message)
+
+            except Exception as e:
+                logger.error(f"Ошибка при очистке истории для пользователя {user_id}: {e}")
+                error_message = (
+                    "❌ Ошибка очистки памяти\n\n"
+                    "Произошла ошибка при обращении к базе данных."
+                )
+                await update.message.reply_text(error_message)
+
+        else:
+            # Показываем предупреждение с запросом подтверждения
+            warning_message = (
+                "⚠️ Вы уверены, что хотите очистить историю диалога?\n\n"
+                "Это действие удалит:\n"
+                "• Все сообщения в текущем чате\n"
+                "• Историю диалога с ассистентом\n\n"
+                "Для подтверждения используйте команду:\n"
+                "/clear_memory confirm"
+            )
+            await update.message.reply_text(warning_message)
+
+    async def export_memory_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /export_memory - экспорт истории диалога."""
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+
+        logger.info(f"Пользователь {user_id} запросил экспорт памяти")
+
+        # Определяем формат экспорта (по умолчанию text)
+        export_format = 'text'
+        if context.args and len(context.args) > 0:
+            requested_format = context.args[0].lower()
+            if requested_format in ['json', 'text', 'csv']:
+                export_format = requested_format
+
+        try:
+            # Экспортируем историю
+            exported_data = self.memory.export_conversation_history(user_id, chat_id, format=export_format)
+
+            if not exported_data:
+                message = (
+                    "📭 История диалога пуста\n\n"
+                    "У вас пока нет сохраненных сообщений."
+                )
+                await update.message.reply_text(message)
+                return
+
+            # Проверяем размер данных
+            if len(exported_data) > 4000:
+                # Telegram ограничивает размер сообщения, отправляем как файл
+                from io import BytesIO
+
+                file_extension = export_format
+                filename = f"chat_history_{user_id}_{chat_id}.{file_extension}"
+
+                file_data = BytesIO(exported_data.encode('utf-8'))
+                file_data.name = filename
+
+                await update.message.reply_document(
+                    document=file_data,
+                    filename=filename,
+                    caption=f"📄 Экспорт истории диалога ({export_format.upper()})"
+                )
+                logger.info(f"Экспорт отправлен файлом для пользователя {user_id}, формат: {export_format}")
+
+            else:
+                # Отправляем как текстовое сообщение
+                if export_format == 'json':
+                    message = f"```json\n{exported_data}\n```"
+                elif export_format == 'csv':
+                    message = f"```csv\n{exported_data}\n```"
+                else:
+                    message = f"📝 История диалога:\n\n{exported_data}"
+
+                await update.message.reply_text(message)
+                logger.info(f"Экспорт отправлен сообщением для пользователя {user_id}, формат: {export_format}")
+
+        except Exception as e:
+            logger.error(f"Ошибка при экспорте истории для пользователя {user_id}: {e}")
+            error_message = (
+                "❌ Ошибка экспорта данных\n\n"
+                "Произошла ошибка при формировании экспорта.\n"
+                f"Попробуйте другой формат: /export_memory [text|json|csv]"
+            )
+            await update.message.reply_text(error_message)
+
+    async def new_session_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /new_session - начать новую сессию диалога."""
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+
+        logger.info(f"Пользователь {user_id} запросил создание новой сессии")
+
+        try:
+            # Завершаем старую активную сессию, если есть
+            old_session_id = self.memory.get_active_session(user_id, chat_id)
+            if old_session_id:
+                self.memory.end_session(old_session_id)
+                logger.info(f"Завершена старая сессия {old_session_id}")
+
+            # Создаём новую сессию
+            new_session_id = self.memory.create_session(user_id, chat_id)
+
+            message = (
+                "🆕 Новая сессия создана!\n\n"
+                f"ID сессии: {new_session_id[:8]}...\n\n"
+                "Теперь бот будет помнить контекст разговора в рамках этой сессии.\n"
+                "Используйте /end_session для завершения текущей сессии.\n"
+                "Используйте /session_info для просмотра информации о сессии."
+            )
+
+            await update.message.reply_text(message)
+            logger.info(f"Создана новая сессия {new_session_id} для пользователя {user_id}")
+
+        except Exception as e:
+            logger.error(f"Ошибка при создании новой сессии для пользователя {user_id}: {e}")
+            error_message = (
+                "❌ Ошибка создания сессии\n\n"
+                "Произошла ошибка при создании новой сессии."
+            )
+            await update.message.reply_text(error_message)
+
+    async def end_session_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /end_session - завершить текущую сессию."""
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+
+        logger.info(f"Пользователь {user_id} запросил завершение сессии")
+
+        try:
+            # Получаем активную сессию
+            session_id = self.memory.get_active_session(user_id, chat_id)
+
+            if not session_id:
+                message = (
+                    "ℹ️ Нет активной сессии\n\n"
+                    "У вас нет активной сессии для завершения.\n"
+                    "Используйте /new_session для создания новой сессии."
+                )
+                await update.message.reply_text(message)
+                return
+
+            # Получаем количество сообщений в сессии
+            history = self.memory.get_conversation_history(
+                user_id, chat_id, limit=1000, session_id=session_id
+            )
+            message_count = len(history)
+
+            # Завершаем сессию
+            success = self.memory.end_session(session_id)
+
+            if success:
+                message = (
+                    "✅ Сессия завершена!\n\n"
+                    f"ID сессии: {session_id[:8]}...\n"
+                    f"Сообщений в сессии: {message_count}\n\n"
+                    "Контекст текущего диалога очищен.\n"
+                    "При следующем сообщении автоматически создастся новая сессия."
+                )
+                logger.info(f"Завершена сессия {session_id} для пользователя {user_id}")
+            else:
+                message = "❌ Ошибка при завершении сессии. Попробуйте позже."
+
+            await update.message.reply_text(message)
+
+        except Exception as e:
+            logger.error(f"Ошибка при завершении сессии для пользователя {user_id}: {e}")
+            error_message = (
+                "❌ Ошибка завершения сессии\n\n"
+                "Произошла ошибка при обращении к базе данных."
+            )
+            await update.message.reply_text(error_message)
+
+    async def session_info_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /session_info - информация о текущей сессии."""
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+
+        logger.info(f"Пользователь {user_id} запросил информацию о сессии")
+
+        try:
+            # Получаем активную сессию
+            session_id = self.memory.get_active_session(user_id, chat_id)
+
+            if not session_id:
+                message = (
+                    "ℹ️ Нет активной сессии\n\n"
+                    "У вас нет активной сессии.\n"
+                    "При следующем сообщении автоматически создастся новая сессия.\n\n"
+                    "Команды управления сессиями:\n"
+                    "/new_session - создать новую сессию\n"
+                    "/session_info - информация о сессии"
+                )
+                await update.message.reply_text(message)
+                return
+
+            # Получаем историю сессии
+            history = self.memory.get_conversation_history(
+                user_id, chat_id, limit=1000, session_id=session_id
+            )
+
+            # Подсчитываем статистику
+            message_count = len(history)
+            user_messages = sum(1 for msg in history if msg['message_type'] == 'user')
+            assistant_messages = sum(1 for msg in history if msg['message_type'] == 'assistant')
+
+            # Получаем временные метки
+            if history:
+                first_message = history[0]
+                last_message = history[-1]
+                started_at = first_message['timestamp']
+                last_activity = last_message['timestamp']
+            else:
+                started_at = "Неизвестно"
+                last_activity = "Неизвестно"
+
+            message = (
+                "📊 Информация о текущей сессии\n\n"
+                f"🆔 ID сессии: {session_id[:16]}...\n"
+                f"📅 Начало: {started_at}\n"
+                f"🕐 Последняя активность: {last_activity}\n\n"
+                f"💬 Всего сообщений: {message_count}\n"
+                f"👤 От вас: {user_messages}\n"
+                f"🤖 От ассистента: {assistant_messages}\n\n"
+                "Бот использует последние 10 сообщений из этой сессии для контекста.\n\n"
+                "Команды:\n"
+                "/new_session - начать новую сессию\n"
+                "/end_session - завершить текущую сессию"
+            )
+
+            await update.message.reply_text(message)
+
+        except Exception as e:
+            logger.error(f"Ошибка при получении информации о сессии для пользователя {user_id}: {e}")
+            error_message = (
+                "❌ Ошибка получения информации\n\n"
+                "Произошла ошибка при обращении к базе данных."
             )
             await update.message.reply_text(error_message)
 
