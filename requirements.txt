@@ -1,10 +1,13 @@
-# Основные зависимости для Telegram бота с Yandex GPT
+# Основные зависимости для Telegram бота с несколькими LLM провайдерами
 
 # Telegram Bot API
 python-telegram-bot>=22.0
 
-# HTTP клиент для асинхронных запросов
+# HTTP клиент для асинхронных запросов (используется для Yandex GPT)
 httpx>=0.27.0
+
+# OpenAI библиотека (для OpenAI GPT и DeepSeek)
+openai>=1.0.0
 
 # Загрузка переменных окружения из .env файла (опционально)
 python-dotenv==1.0.0
