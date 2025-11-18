@@ -238,6 +238,47 @@ class MCPClient:
         logger.warning(f"Инструмент '{tool_name}' не найден")
         return None
 
+    async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Optional[Any]:
+        """
+        Вызов MCP инструмента с заданными аргументами.
+
+        Args:
+            tool_name: Название инструмента
+            arguments: Словарь с аргументами для инструмента
+
+        Returns:
+            Результат выполнения инструмента или None в случае ошибки
+        """
+        if not self._connected or not self.session:
+            logger.error("Клиент не подключен. Вызовите connect() сначала")
+            return None
+
+        try:
+            logger.info(f"Вызов MCP инструмента: {tool_name} с аргументами {arguments}")
+
+            # Вызов инструмента через MCP сессию
+            response = await self.session.call_tool(tool_name, arguments=arguments)
+
+            # Обработка ответа
+            if hasattr(response, 'content'):
+                # Извлекаем текстовый контент из ответа
+                result = []
+                for content_item in response.content:
+                    if hasattr(content_item, 'text'):
+                        result.append(content_item.text)
+
+                # Объединяем все текстовые части
+                combined_result = '\n'.join(result) if result else None
+                logger.info(f"Результат выполнения инструмента {tool_name} получен")
+                return combined_result
+            else:
+                logger.warning(f"Инструмент {tool_name} вернул ответ без контента")
+                return None
+
+        except Exception as e:
+            logger.error(f"Ошибка при вызове инструмента {tool_name}: {e}", exc_info=True)
+            return None
+
     async def disconnect(self) -> None:
         """
         Закрытие соединения с MCP-сервером.
@@ -379,5 +420,61 @@ def get_weather_stdio_mcp_config() -> Dict[str, Any]:
         "type": "stdio",
         "command": sys.executable,
         "args": [str(weather_server_path), "--stdio"],
+        "env": {}
+    }
+
+
+def get_github_mcp_config() -> Dict[str, Any]:
+    """
+    Получение конфигурации для локального GitHub MCP сервера.
+
+    GitHub MCP сервер предоставляет инструменты для работы с GitHub API:
+    - get_user_repositories: получение списка публичных репозиториев пользователя
+    - get_user_info: получение информации о пользователе GitHub
+    - get_repository_commits: получение информации о коммитах в репозитории
+
+    ВАЖНО: Из-за бага в MCP Python SDK (https://github.com/modelcontextprotocol/python-sdk/issues/862),
+    stdio транспорт зависает при инициализации. Используется HTTP/SSE транспорт.
+
+    Для работы нужно запустить сервер отдельно:
+        python mcp_server/github.py
+
+    Returns:
+        Словарь с конфигурацией для подключения к GitHub MCP серверу
+    """
+    return {
+        "type": "http",
+        "url": "http://localhost:8001/sse",
+        "headers": {}
+    }
+
+
+def get_github_stdio_mcp_config() -> Dict[str, Any]:
+    """
+    Получение конфигурации для GitHub MCP сервера через stdio транспорт.
+
+    ВНИМАНИЕ: stdio транспорт имеет критический баг в MCP Python SDK 1.21.2,
+    который вызывает зависание при инициализации на macOS, Windows и Linux.
+    См. https://github.com/modelcontextprotocol/python-sdk/issues/862
+
+    Эта функция сохранена для обратной совместимости и может быть использована
+    когда баг будет исправлен в будущих версиях SDK.
+
+    Returns:
+        Словарь с конфигурацией для подключения к GitHub MCP серверу через stdio
+    """
+    import sys
+    from pathlib import Path
+
+    project_root = Path(__file__).parent
+    github_server_path = project_root / "mcp_server" / "github.py"
+
+    if not github_server_path.exists():
+        logger.warning(f"GitHub MCP сервер не найден: {github_server_path}")
+
+    return {
+        "type": "stdio",
+        "command": sys.executable,
+        "args": [str(github_server_path), "--stdio"],
         "env": {}
     }

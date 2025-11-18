@@ -4,10 +4,16 @@ Telegram-бот с поддержкой нескольких LLM провайд�
 
 ## 🌟 Новое в этой версии
 
+- **GitHub Integration с DeepSeek (NEW!):**
+  - Интеграция GitHub API через MCP (Model Context Protocol)
+  - Автоматический вызов GitHub tools при использовании DeepSeek
+  - Получение информации о пользователях, репозиториях и коммитах GitHub
+  - Множественные tool calls в одном запросе
+  - **Работает только с DeepSeek** - Yandex GPT и OpenAI не затронуты
 - **Поддержка нескольких LLM провайдеров:**
   - OpenAI GPT (gpt-3.5-turbo) - по умолчанию
   - Yandex GPT (yandexgpt-lite)
-  - DeepSeek (deepseek-chat)
+  - DeepSeek (deepseek-chat) + GitHub MCP tools
 - **Динамическое переключение между моделями** с командами `/openai`, `/yandex`, `/deepseek`
 - **Персистентное хранение выбора** пользователя между сессиями
 - **Автоматический fallback** на Yandex GPT при недоступности выбранного провайдера
@@ -32,9 +38,14 @@ Telegram-бот с поддержкой нескольких LLM провайд�
   - Сравнение результатов работы модели при разных значениях temperature
   - Автоматический анализ креативности и стабильности ответов
   - Рекомендации по выбору оптимальной температуры для задачи
-- **MCP (Model Context Protocol) интеграция (NEW!):**
+- **MCP (Model Context Protocol) интеграция:**
   - Подключение к внешним инструментам через унифицированный протокол
-  - Поддержка Weather MCP сервера для получения погодных данных из US National Weather Service
+  - **GitHub MCP Server (только для DeepSeek):**
+    - `get_user_info` - информация о пользователях GitHub
+    - `get_user_repositories` - список репозиториев
+    - `get_repository_commits` - коммиты в репозиториях
+    - Автоматическое использование через естественный язык
+  - Weather MCP сервер для получения погодных данных из US National Weather Service
   - Команда /mcp_tools для просмотра доступных инструментов
   - Модульная архитектура для легкого добавления новых MCP-серверов
 - Динамическое переключение между режимами для каждого пользователя
@@ -116,7 +127,43 @@ python bot.py
 
 ## Примеры использования
 
-### Переключение между LLM моделями (NEW!)
+### Использование GitHub Integration с DeepSeek (NEW!)
+
+DeepSeek автоматически использует GitHub tools для ответов на вопросы о GitHub:
+
+```
+You: /deepseek
+Bot: ✅ Выбрана модель DeepSeek (с GitHub integration)
+
+You: Покажи информацию о пользователе GitHub torvalds
+Bot: [DeepSeek автоматически вызывает get_user_info]
+     Linus Torvalds - создатель Linux и Git. Находится в Portland, OR.
+     У него 150+ публичных репозиториев и более 200K подписчиков...
+
+You: Какие репозитории есть у пользователя octocat?
+Bot: [DeepSeek вызывает get_user_repositories]
+     У пользователя octocat найдено 8 публичных репозиториев:
+     1. Hello-World - My first repository on GitHub!
+     2. octocat.github.io - GitHub Pages site...
+
+You: Расскажи о пользователе microsoft и покажи его репозитории
+Bot: [DeepSeek вызывает get_user_info + get_user_repositories]
+     Microsoft - один из крупнейших разработчиков ПО.
+     У организации 6000+ публичных репозиториев, включая:
+     - vscode (Visual Studio Code)
+     - TypeScript
+     - terminal...
+```
+
+**Доступные GitHub tools:**
+- Информация о пользователях
+- Списки репозиториев
+- История коммитов
+- Множественные вызовы в одном запросе
+
+Подробнее: [docs/GITHUB_INTEGRATION.md](docs/GITHUB_INTEGRATION.md)
+
+### Переключение между LLM моделями
 
 Бот поддерживает динамическое переключение между тремя LLM провайдерами:
 

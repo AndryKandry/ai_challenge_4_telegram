@@ -26,7 +26,7 @@ from format_manager import FormatManager
 from prompts import SYSTEM_PROMPT_DEFAULT, SYSTEM_PROMPT_JSON, SYSTEM_PROMPT_XML
 from temperature_tester import TemperatureTester
 from database import MemoryManager
-from mcp_client import MCPClient, get_weather_mcp_config
+from mcp_client import MCPClient, get_weather_mcp_config, get_github_mcp_config
 
 # Импорт провайдеров LLM и хранилища настроек
 from providers import OpenAIProvider, YandexGPTProvider, DeepSeekProvider
@@ -200,9 +200,21 @@ class TelegramBot:
         else:
             logger.warning("OPENAI_API_KEY не задан, OpenAI провайдер недоступен")
 
+        # Инициализация DeepSeek с MCP клиентом (только для DeepSeek)
         self.deepseek_provider = None
+        self.github_mcp_client = None
         if deepseek_api_key:
-            self.deepseek_provider = DeepSeekProvider(deepseek_api_key)
+            # Создаём MCP клиент для GitHub (только для DeepSeek)
+            try:
+                github_config = get_github_mcp_config()
+                self.github_mcp_client = MCPClient(github_config)
+                logger.info("GitHub MCP клиент создан для DeepSeek Provider")
+            except Exception as e:
+                logger.warning(f"Не удалось создать GitHub MCP клиент: {e}. DeepSeek будет работать без MCP tools.")
+                self.github_mcp_client = None
+
+            # Создаём DeepSeek провайдер с MCP клиентом
+            self.deepseek_provider = DeepSeekProvider(deepseek_api_key, mcp_client=self.github_mcp_client)
             logger.info("DeepSeek Provider инициализирован")
         else:
             logger.warning("DEEPSEEK_API_KEY не задан, DeepSeek провайдер недоступен")
@@ -297,8 +309,13 @@ class TelegramBot:
             "/end_session - Завершить текущую сессию\n\n"
             "🧪 Тестирование:\n"
             "/test_temperature - Сравнить работу LLM при разных температурах\n\n"
-            "🛠 MCP Инструменты (Погода):\n"
-            "/mcp_tools - Показать доступные инструменты для погоды\n\n"
+            "🛠 MCP Инструменты:\n"
+            "/mcp_tools - Показать доступные инструменты (погода)\n\n"
+            "🔧 GitHub Integration (только для DeepSeek):\n"
+            "При использовании DeepSeek вы можете задавать вопросы о GitHub:\n"
+            "• Информация о пользователях GitHub\n"
+            "• Списки репозиториев\n"
+            "• История коммитов\n\n"
             "❓ Используй /help для полной справки."
         )
         await update.message.reply_text(welcome_message)
@@ -348,7 +365,15 @@ class TelegramBot:
             "🛠 MCP (Model Context Protocol):\n"
             "/mcp_tools - Получить список доступных MCP инструментов\n\n"
             "MCP позволяет боту подключаться к внешним инструментам.\n"
-            "Сейчас доступен Weather MCP сервер для получения погоды из US National Weather Service.\n\n"
+            "Доступен Weather MCP сервер для получения погоды из US National Weather Service.\n\n"
+            "🔧 GitHub Integration (только для DeepSeek):\n"
+            "При использовании DeepSeek модели, бот автоматически подключается к GitHub API.\n"
+            "Вы можете задавать вопросы на естественном языке:\n"
+            "• \"Покажи информацию о пользователе GitHub torvalds\"\n"
+            "• \"Какие репозитории есть у пользователя octocat?\"\n"
+            "• \"Покажи последние коммиты в репозитории facebook/react\"\n"
+            "• \"Расскажи о пользователе microsoft и покажи его репозитории\"\n\n"
+            "DeepSeek автоматически вызовет нужные инструменты и сформирует ответ.\n\n"
             "💡 Как работают сессии:\n"
             "• Сессия автоматически создается при первом сообщении\n"
             "• Бот помнит последние 10 сообщений из текущей сессии\n"
@@ -1274,9 +1299,46 @@ class TelegramBot:
                 # Если не удалось отправить сообщение об ошибке, просто логируем
                 logger.error(f"Не удалось отправить сообщение об ошибке: {e}")
 
+    async def _startup(self, application: Application) -> None:
+        """
+        Асинхронная инициализация при запуске бота.
+        Подключение к GitHub MCP серверу для DeepSeek.
+        """
+        if self.github_mcp_client:
+            try:
+                logger.info("Подключение к GitHub MCP серверу...")
+                connected = await self.github_mcp_client.connect()
+                if connected:
+                    logger.info("✅ GitHub MCP сервер успешно подключен для DeepSeek")
+                    # Проверяем доступные tools
+                    tools = await self.github_mcp_client.list_tools()
+                    logger.info(f"Доступно {len(tools)} GitHub MCP tools: {[t['name'] for t in tools]}")
+                else:
+                    logger.warning("❌ Не удалось подключиться к GitHub MCP серверу. DeepSeek будет работать без MCP tools.")
+            except Exception as e:
+                logger.error(f"Ошибка при подключении к GitHub MCP серверу: {e}", exc_info=True)
+
+    async def _shutdown(self, application: Application) -> None:
+        """
+        Асинхронное завершение при остановке бота.
+        Отключение от GitHub MCP сервера.
+        """
+        if self.github_mcp_client and self.github_mcp_client.is_connected():
+            try:
+                logger.info("Отключение от GitHub MCP сервера...")
+                await self.github_mcp_client.disconnect()
+                logger.info("✅ GitHub MCP сервер отключен")
+            except Exception as e:
+                logger.error(f"Ошибка при отключении от GitHub MCP сервера: {e}", exc_info=True)
+
     def run(self) -> None:
         """Запуск бота."""
         logger.info("Запуск Telegram бота...")
+
+        # Регистрируем callback'и для запуска и остановки
+        self.application.post_init = self._startup
+        self.application.post_shutdown = self._shutdown
+
         # В версии 22+ run_polling() автоматически инициализирует и останавливает приложение
         # Добавляем параметры для более корректной обработки ошибок
         self.application.run_polling(
