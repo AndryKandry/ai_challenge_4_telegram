@@ -26,6 +26,7 @@ from format_manager import FormatManager
 from prompts import SYSTEM_PROMPT_DEFAULT, SYSTEM_PROMPT_JSON, SYSTEM_PROMPT_XML
 from temperature_tester import TemperatureTester
 from database import MemoryManager
+from mcp_client import MCPClient, get_weather_mcp_config
 
 # Настройка логирования
 logging.basicConfig(
@@ -175,7 +176,17 @@ class TelegramBot:
             yandex_api_key: API ключ Yandex Cloud
         """
         self.gpt_client = YandexGPTClient(yandex_api_key)
-        self.application = Application.builder().token(telegram_token).build()
+
+        # Создаём приложение с увеличенными таймаутами для стабильности
+        self.application = (
+            Application.builder()
+            .token(telegram_token)
+            .connect_timeout(30.0)  # Таймаут подключения
+            .read_timeout(30.0)     # Таймаут чтения
+            .write_timeout(30.0)    # Таймаут записи
+            .pool_timeout(30.0)     # Таймаут пула соединений
+            .build()
+        )
 
         # Хранилище режимов вывода для каждого пользователя
         self.user_modes: dict[int, str] = {}  # {user_id: "text" | "json" | "xml"}
@@ -210,6 +221,12 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("end_session", self.end_session_command))
         self.application.add_handler(CommandHandler("session_info", self.session_info_command))
 
+        # Команды MCP
+        self.application.add_handler(CommandHandler("mcp_tools", self.mcp_tools_command))
+
+        # Обработчик ошибок
+        self.application.add_error_handler(self.error_handler)
+
         # Обработчик текстовых сообщений
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message)
@@ -234,6 +251,8 @@ class TelegramBot:
             "/end_session - Завершить текущую сессию\n\n"
             "🧪 Тестирование:\n"
             "/test_temperature - Сравнить работу LLM при разных температурах\n\n"
+            "🛠 MCP Инструменты (Погода):\n"
+            "/mcp_tools - Показать доступные инструменты для погоды\n\n"
             "❓ Используй /help для полной справки."
         )
         await update.message.reply_text(welcome_message)
@@ -273,6 +292,10 @@ class TelegramBot:
             "• 0.0 = детерминированность (точные ответы)\n"
             "• 0.7 = баланс (универсальный режим)\n"
             "• 1.0 = креативность (оригинальные идеи)\n\n"
+            "🛠 MCP (Model Context Protocol):\n"
+            "/mcp_tools - Получить список доступных MCP инструментов\n\n"
+            "MCP позволяет боту подключаться к внешним инструментам.\n"
+            "Сейчас доступен Weather MCP сервер для получения погоды из US National Weather Service.\n\n"
             "💡 Как работают сессии:\n"
             "• Сессия автоматически создается при первом сообщении\n"
             "• Бот помнит последние 10 сообщений из текущей сессии\n"
@@ -877,10 +900,151 @@ class TelegramBot:
             )
             await update.message.reply_text(error_message)
 
+    async def mcp_tools_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Обработчик команды /mcp_tools - получение списка доступных MCP инструментов.
+
+        Подключается к локальному Weather MCP серверу и выводит список всех доступных инструментов.
+        """
+        user_id = update.effective_user.id
+        logger.info(f"Пользователь {user_id} запросил список MCP инструментов")
+
+        # Отправка сообщения о начале загрузки
+        loading_message = await update.message.reply_text(
+            "🔄 Получаю список доступных MCP инструментов...\n"
+            "Подключение к Weather MCP серверу..."
+        )
+
+        try:
+            # Получение конфигурации Weather MCP
+            mcp_config = get_weather_mcp_config()
+
+            # Создание MCP клиента
+            mcp_client = MCPClient(mcp_config)
+
+            # Подключение к серверу
+            connected = await mcp_client.connect()
+
+            if not connected:
+                error_message = (
+                    "❌ Ошибка подключения к MCP-серверу\n\n"
+                    "Не удалось установить соединение с Weather MCP сервером.\n\n"
+                    "Возможные причины:\n"
+                    "• Файл mcp_server/weather.py не найден\n"
+                    "• Ошибка запуска Python процесса сервера\n"
+                    "• Отсутствуют необходимые зависимости (mcp, httpx)\n\n"
+                    "Проверьте настройки и попробуйте снова."
+                )
+                await loading_message.edit_text(error_message)
+                return
+
+            # Получение списка инструментов
+            tools = await mcp_client.list_tools()
+
+            # Закрытие соединения
+            await mcp_client.disconnect()
+
+            if not tools:
+                message = (
+                    "📭 Список инструментов пуст\n\n"
+                    "MCP-сервер не предоставил ни одного инструмента.\n"
+                    "Проверьте конфигурацию сервера."
+                )
+                await loading_message.edit_text(message)
+                return
+
+            # Форматирование ответа
+            response = "🛠 <b>Доступные MCP инструменты:</b>\n\n"
+
+            for idx, tool in enumerate(tools, 1):
+                response += f"{idx}. <b>{tool['name']}</b>\n"
+                response += f"   📝 {tool['description']}\n"
+
+                # Извлечение параметров из inputSchema
+                schema = tool.get('inputSchema', {})
+                if isinstance(schema, dict):
+                    properties = schema.get('properties', {})
+                    if properties:
+                        params = list(properties.keys())
+                        response += f"   ⚙️ Параметры: {', '.join(params)}\n"
+
+                response += "\n"
+
+            response += f"📊 Всего инструментов: {len(tools)}"
+
+            # Проверка длины сообщения (Telegram ограничение)
+            if len(response) > 4096:
+                # Разбиваем на части
+                parts = self._split_long_message(response, 4096)
+                await loading_message.delete()
+                for part in parts:
+                    await update.message.reply_text(part, parse_mode="HTML")
+                    await asyncio.sleep(0.5)
+            else:
+                # Отправка ответа пользователю
+                await loading_message.edit_text(response, parse_mode="HTML")
+
+            logger.info(f"Отправлен список из {len(tools)} MCP инструментов пользователю {user_id}")
+
+        except ImportError as e:
+            logger.error(f"Ошибка импорта MCP библиотеки: {e}")
+            error_message = (
+                "❌ MCP библиотека не установлена\n\n"
+                "Для использования MCP функций необходимо установить библиотеку:\n"
+                "<code>pip install mcp</code>\n\n"
+                "После установки перезапустите бота."
+            )
+            await loading_message.edit_text(error_message, parse_mode="HTML")
+
+        except Exception as e:
+            logger.error(f"Ошибка при получении списка MCP инструментов для пользователя {user_id}: {e}", exc_info=True)
+            error_message = (
+                f"❌ Ошибка при получении списка инструментов\n\n"
+                f"Произошла непредвиденная ошибка:\n"
+                f"<code>{str(e)}</code>\n\n"
+                f"Пожалуйста, попробуйте позже или обратитесь к администратору."
+            )
+            await loading_message.edit_text(error_message, parse_mode="HTML")
+
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Обработчик ошибок для логирования и уведомления пользователя.
+
+        Args:
+            update: Объект обновления (может быть None)
+            context: Контекст с информацией об ошибке
+        """
+        # Логируем ошибку
+        logger.error("Произошла ошибка при обработке обновления:", exc_info=context.error)
+
+        # Специальная обработка для сетевых ошибок
+        from telegram.error import TimedOut, NetworkError
+
+        if isinstance(context.error, (TimedOut, NetworkError)):
+            logger.warning(
+                f"Сетевая ошибка: {context.error.__class__.__name__}. "
+                "Возможны проблемы с интернет-соединением."
+            )
+            # Не отправляем сообщение пользователю при таймауте,
+            # т.к. это может вызвать новый таймаут
+            return
+
+        # Для других ошибок пытаемся уведомить пользователя
+        if update and isinstance(update, Update) and update.effective_message:
+            try:
+                await update.effective_message.reply_text(
+                    "⚠️ Произошла ошибка при обработке вашего запроса.\n"
+                    "Пожалуйста, попробуйте еще раз через несколько секунд."
+                )
+            except Exception as e:
+                # Если не удалось отправить сообщение об ошибке, просто логируем
+                logger.error(f"Не удалось отправить сообщение об ошибке: {e}")
+
     def run(self) -> None:
         """Запуск бота."""
         logger.info("Запуск Telegram бота...")
-        self.application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # В версии 22+ run_polling() автоматически инициализирует и останавливает приложение
+        self.application.run_polling()
 
 
 def validate_environment() -> tuple[str, str]:
