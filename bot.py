@@ -26,6 +26,11 @@ from format_manager import FormatManager
 from prompts import SYSTEM_PROMPT_DEFAULT, SYSTEM_PROMPT_JSON, SYSTEM_PROMPT_XML
 from temperature_tester import TemperatureTester
 from database import MemoryManager
+from mcp_client import MCPClient, get_weather_mcp_config
+
+# Импорт провайдеров LLM и хранилища настроек
+from providers import OpenAIProvider, YandexGPTProvider, DeepSeekProvider
+from storage import UserSettings
 
 # Настройка логирования
 logging.basicConfig(
@@ -166,16 +171,57 @@ class YandexGPTClient:
 class TelegramBot:
     """Основной класс Telegram бота."""
 
-    def __init__(self, telegram_token: str, yandex_api_key: str):
+    def __init__(
+        self,
+        telegram_token: str,
+        yandex_api_key: str,
+        openai_api_key: Optional[str] = None,
+        deepseek_api_key: Optional[str] = None
+    ):
         """
         Инициализация бота.
 
         Args:
             telegram_token: Токен Telegram бота
             yandex_api_key: API ключ Yandex Cloud
+            openai_api_key: API ключ OpenAI (опционально)
+            deepseek_api_key: API ключ DeepSeek (опционально)
         """
+        # Сохраняем старый клиент для обратной совместимости
         self.gpt_client = YandexGPTClient(yandex_api_key)
-        self.application = Application.builder().token(telegram_token).build()
+
+        # Инициализация провайдеров
+        self.yandex_provider = YandexGPTProvider(yandex_api_key)
+
+        self.openai_provider = None
+        if openai_api_key:
+            self.openai_provider = OpenAIProvider(openai_api_key)
+            logger.info("OpenAI Provider инициализирован")
+        else:
+            logger.warning("OPENAI_API_KEY не задан, OpenAI провайдер недоступен")
+
+        self.deepseek_provider = None
+        if deepseek_api_key:
+            self.deepseek_provider = DeepSeekProvider(deepseek_api_key)
+            logger.info("DeepSeek Provider инициализирован")
+        else:
+            logger.warning("DEEPSEEK_API_KEY не задан, DeepSeek провайдер недоступен")
+
+        # Хранилище пользовательских настроек
+        self.user_settings = UserSettings()
+
+        # Создаём приложение с увеличенными таймаутами для стабильности
+        self.application = (
+            Application.builder()
+            .token(telegram_token)
+            .connect_timeout(60.0)  # Таймаут подключения
+            .read_timeout(60.0)     # Таймаут чтения
+            .write_timeout(60.0)    # Таймаут записи
+            .pool_timeout(60.0)     # Таймаут пула соединений
+            .get_updates_connect_timeout(60.0)  # Таймаут для get_updates
+            .get_updates_read_timeout(60.0)     # Таймаут чтения для get_updates
+            .build()
+        )
 
         # Хранилище режимов вывода для каждого пользователя
         self.user_modes: dict[int, str] = {}  # {user_id: "text" | "json" | "xml"}
@@ -210,6 +256,18 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("end_session", self.end_session_command))
         self.application.add_handler(CommandHandler("session_info", self.session_info_command))
 
+        # Команды MCP
+        self.application.add_handler(CommandHandler("mcp_tools", self.mcp_tools_command))
+
+        # Команды переключения LLM провайдера
+        self.application.add_handler(CommandHandler("openai", self.openai_command))
+        self.application.add_handler(CommandHandler("yandex", self.yandex_command))
+        self.application.add_handler(CommandHandler("deepseek", self.deepseek_command))
+        self.application.add_handler(CommandHandler("model", self.model_command))
+
+        # Обработчик ошибок
+        self.application.add_error_handler(self.error_handler)
+
         # Обработчик текстовых сообщений
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message)
@@ -219,10 +277,15 @@ class TelegramBot:
         """Обработчик команды /start."""
         user_id = update.effective_user.id
         welcome_message = (
-            "👋 Привет! Я ИИ-ассистент на базе Yandex GPT.\n\n"
+            "👋 Привет! Я ИИ-ассистент с поддержкой нескольких LLM моделей.\n\n"
             "Просто отправь мне текстовое сообщение, и я постараюсь помочь!\n\n"
             "💡 Я помню контекст диалога в рамках сессии!\n"
             "📝 Ограничение: максимум 2000 символов на сообщение.\n\n"
+            "🤖 Выбор LLM модели:\n"
+            "/openai - OpenAI GPT (gpt-3.5-turbo)\n"
+            "/yandex - Yandex GPT (yandexgpt-lite)\n"
+            "/deepseek - DeepSeek (deepseek-chat)\n"
+            "/model - Показать текущую модель\n\n"
             "🔄 Режимы вывода:\n"
             "/text - Текстовый (по умолчанию)\n"
             "/json - JSON код\n"
@@ -234,6 +297,8 @@ class TelegramBot:
             "/end_session - Завершить текущую сессию\n\n"
             "🧪 Тестирование:\n"
             "/test_temperature - Сравнить работу LLM при разных температурах\n\n"
+            "🛠 MCP Инструменты (Погода):\n"
+            "/mcp_tools - Показать доступные инструменты для погоды\n\n"
             "❓ Используй /help для полной справки."
         )
         await update.message.reply_text(welcome_message)
@@ -244,13 +309,20 @@ class TelegramBot:
         help_message = (
             "🤖 Справка по использованию бота:\n\n"
             "• Просто напиши мне любой вопрос или запрос\n"
-            "• Я отвечу с помощью искусственного интеллекта Yandex GPT\n"
+            "• Я отвечу с помощью искусственного интеллекта\n"
             "• Я помню контекст разговора в рамках текущей сессии! 💡\n"
             "• Максимальная длина сообщения: 2000 символов\n\n"
             "📌 Основные команды:\n"
             "/start - Начать работу с ботом\n"
             "/help - Показать эту справку\n"
             "/status - Проверить текущий режим вывода\n\n"
+            "🤖 Выбор LLM модели:\n"
+            "/openai - OpenAI GPT (gpt-3.5-turbo)\n"
+            "/yandex - Yandex GPT (yandexgpt-lite)\n"
+            "/deepseek - DeepSeek (deepseek-chat)\n"
+            "/model - Показать текущую выбранную модель\n\n"
+            "По умолчанию используется OpenAI GPT для новых пользователей.\n"
+            "Выбор модели сохраняется между сессиями.\n\n"
             "💾 Управление сессиями:\n"
             "/session_info - Информация о текущей сессии\n"
             "/new_session - Начать новую сессию (очистить контекст)\n"
@@ -273,6 +345,10 @@ class TelegramBot:
             "• 0.0 = детерминированность (точные ответы)\n"
             "• 0.7 = баланс (универсальный режим)\n"
             "• 1.0 = креативность (оригинальные идеи)\n\n"
+            "🛠 MCP (Model Context Protocol):\n"
+            "/mcp_tools - Получить список доступных MCP инструментов\n\n"
+            "MCP позволяет боту подключаться к внешним инструментам.\n"
+            "Сейчас доступен Weather MCP сервер для получения погоды из US National Weather Service.\n\n"
             "💡 Как работают сессии:\n"
             "• Сессия автоматически создается при первом сообщении\n"
             "• Бот помнит последние 10 сообщений из текущей сессии\n"
@@ -515,8 +591,34 @@ class TelegramBot:
         # Отправка индикатора набора текста
         await update.message.chat.send_action("typing")
 
-        # Отправка запроса в Yandex GPT с контекстом истории диалога
-        response = await self.gpt_client.send_message_with_history(
+        # Получаем выбранный провайдер для пользователя
+        selected_provider = self.user_settings.get_provider(user_id)
+        logger.info(f"Выбранный провайдер для пользователя {user_id}: {selected_provider}")
+
+        # Выбор провайдера и отправка запроса
+        if selected_provider == "openai" and self.openai_provider:
+            provider = self.openai_provider
+        elif selected_provider == "deepseek" and self.deepseek_provider:
+            provider = self.deepseek_provider
+        else:
+            # Fallback на Yandex если выбранный провайдер недоступен
+            if selected_provider == "openai" and not self.openai_provider:
+                logger.warning(
+                    f"OpenAI выбран для пользователя {user_id}, но недоступен. "
+                    f"Используется Yandex GPT"
+                )
+                self.user_settings.set_provider(user_id, "yandex")
+            elif selected_provider == "deepseek" and not self.deepseek_provider:
+                logger.warning(
+                    f"DeepSeek выбран для пользователя {user_id}, но недоступен. "
+                    f"Используется Yandex GPT"
+                )
+                self.user_settings.set_provider(user_id, "yandex")
+
+            provider = self.yandex_provider
+
+        # Отправка запроса к выбранному провайдеру
+        response = await provider.generate_response(
             user_message, system_prompt, conversation_history
         )
 
@@ -527,8 +629,12 @@ class TelegramBot:
                 user_id=user_id,
                 chat_id=chat_id,
                 action_type="gpt_request",
-                description="Запрос к Yandex GPT API",
-                input_data={"message": user_message[:100], "mode": mode},
+                description=f"Запрос к {selected_provider.upper()} GPT API",
+                input_data={
+                    "message": user_message[:100],
+                    "mode": mode,
+                    "provider": selected_provider
+                },
                 output_data={"response_received": response is not None},
                 execution_time=execution_time
             )
@@ -537,12 +643,22 @@ class TelegramBot:
 
         if not response:
             # Ошибка получения ответа от API
+            provider_names = {
+                "openai": "OpenAI",
+                "yandex": "Yandex GPT",
+                "deepseek": "DeepSeek"
+            }
+            provider_name = provider_names.get(selected_provider, "LLM")
+
             error_message = (
-                "😔 Извините, произошла временная ошибка при обработке вашего запроса.\n\n"
-                "Пожалуйста, попробуйте позже или переформулируйте вопрос."
+                f"⚠️ Произошла ошибка при обращении к {provider_name}\n\n"
+                f"Попробуйте позже или переключитесь на другой провайдер:\n"
+                f"/openai - OpenAI GPT\n"
+                f"/yandex - Yandex GPT\n"
+                f"/deepseek - DeepSeek"
             )
             await update.message.reply_text(error_message)
-            logger.error(f"Не удалось получить ответ для пользователя {user_id}")
+            logger.error(f"Не удалось получить ответ от {provider_name} для пользователя {user_id}")
             return
 
         # Сохранение ответа ассистента в БД
@@ -877,24 +993,312 @@ class TelegramBot:
             )
             await update.message.reply_text(error_message)
 
+    async def mcp_tools_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Обработчик команды /mcp_tools - получение списка доступных MCP инструментов.
+
+        Подключается к локальному Weather MCP серверу и выводит список всех доступных инструментов.
+        """
+        user_id = update.effective_user.id
+        logger.info(f"Пользователь {user_id} запросил список MCP инструментов")
+
+        # Отправка сообщения о начале загрузки
+        loading_message = await update.message.reply_text(
+            "🔄 Получаю список доступных MCP инструментов...\n"
+            "Подключение к Weather MCP серверу..."
+        )
+
+        try:
+            # Получение конфигурации Weather MCP
+            mcp_config = get_weather_mcp_config()
+
+            # Создание MCP клиента
+            mcp_client = MCPClient(mcp_config)
+
+            # Подключение к серверу
+            connected = await mcp_client.connect()
+
+            if not connected:
+                error_message = (
+                    "❌ Ошибка подключения к MCP-серверу\n\n"
+                    "Не удалось установить соединение с Weather MCP сервером.\n\n"
+                    "Возможные причины:\n"
+                    "• Файл mcp_server/weather.py не найден\n"
+                    "• Ошибка запуска Python процесса сервера\n"
+                    "• Отсутствуют необходимые зависимости (mcp, httpx)\n\n"
+                    "Проверьте настройки и попробуйте снова."
+                )
+                await loading_message.edit_text(error_message)
+                return
+
+            # Получение списка инструментов
+            tools = await mcp_client.list_tools()
+
+            # Закрытие соединения
+            await mcp_client.disconnect()
+
+            if not tools:
+                message = (
+                    "📭 Список инструментов пуст\n\n"
+                    "MCP-сервер не предоставил ни одного инструмента.\n"
+                    "Проверьте конфигурацию сервера."
+                )
+                await loading_message.edit_text(message)
+                return
+
+            # Форматирование ответа
+            response = "🛠 <b>Доступные MCP инструменты:</b>\n\n"
+
+            for idx, tool in enumerate(tools, 1):
+                response += f"{idx}. <b>{tool['name']}</b>\n"
+                response += f"   📝 {tool['description']}\n"
+
+                # Извлечение параметров из inputSchema
+                schema = tool.get('inputSchema', {})
+                if isinstance(schema, dict):
+                    properties = schema.get('properties', {})
+                    if properties:
+                        params = list(properties.keys())
+                        response += f"   ⚙️ Параметры: {', '.join(params)}\n"
+
+                response += "\n"
+
+            response += f"📊 Всего инструментов: {len(tools)}"
+
+            # Проверка длины сообщения (Telegram ограничение)
+            if len(response) > 4096:
+                # Разбиваем на части
+                parts = self._split_long_message(response, 4096)
+                await loading_message.delete()
+                for part in parts:
+                    await update.message.reply_text(part, parse_mode="HTML")
+                    await asyncio.sleep(0.5)
+            else:
+                # Отправка ответа пользователю
+                await loading_message.edit_text(response, parse_mode="HTML")
+
+            logger.info(f"Отправлен список из {len(tools)} MCP инструментов пользователю {user_id}")
+
+        except ImportError as e:
+            logger.error(f"Ошибка импорта MCP библиотеки: {e}")
+            error_message = (
+                "❌ MCP библиотека не установлена\n\n"
+                "Для использования MCP функций необходимо установить библиотеку:\n"
+                "<code>pip install mcp</code>\n\n"
+                "После установки перезапустите бота."
+            )
+            await loading_message.edit_text(error_message, parse_mode="HTML")
+
+        except Exception as e:
+            logger.error(f"Ошибка при получении списка MCP инструментов для пользователя {user_id}: {e}", exc_info=True)
+            error_message = (
+                f"❌ Ошибка при получении списка инструментов\n\n"
+                f"Произошла непредвиденная ошибка:\n"
+                f"<code>{str(e)}</code>\n\n"
+                f"Пожалуйста, попробуйте позже или обратитесь к администратору."
+            )
+            await loading_message.edit_text(error_message, parse_mode="HTML")
+
+    async def openai_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /openai - переключение на OpenAI GPT."""
+        user_id = update.effective_user.id
+
+        # Проверяем доступность OpenAI провайдера
+        if not self.openai_provider:
+            error_message = (
+                "❌ OpenAI провайдер недоступен\n\n"
+                "OpenAI API ключ не был настроен при запуске бота.\n"
+                "Обратитесь к администратору для настройки OPENAI_API_KEY."
+            )
+            await update.message.reply_text(error_message)
+            logger.warning(f"Пользователь {user_id} пытался переключиться на OpenAI, но провайдер недоступен")
+            return
+
+        # Сохраняем выбор
+        success = self.user_settings.set_provider(user_id, "openai")
+
+        if success:
+            message = (
+                "✅ Выбрана модель OpenAI GPT\n\n"
+                "Теперь я буду использовать OpenAI для генерации ответов.\n\n"
+                "Используемая модель: gpt-3.5-turbo\n"
+                "Используйте /yandex для переключения на Yandex GPT\n"
+                "Используйте /model для просмотра текущей модели"
+            )
+            logger.info(f"Пользователь {user_id} переключился на провайдер OpenAI")
+        else:
+            message = "❌ Ошибка при сохранении настроек. Попробуйте позже."
+            logger.error(f"Ошибка сохранения провайдера OpenAI для пользователя {user_id}")
+
+        await update.message.reply_text(message)
+
+    async def yandex_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /yandex - переключение на Yandex GPT."""
+        user_id = update.effective_user.id
+
+        # Сохраняем выбор
+        success = self.user_settings.set_provider(user_id, "yandex")
+
+        if success:
+            message = (
+                "✅ Выбрана модель Yandex GPT\n\n"
+                "Теперь я буду использовать Yandex для генерации ответов.\n\n"
+                "Используемая модель: yandexgpt-lite\n"
+                "Используйте /openai для переключения на OpenAI GPT\n"
+                "Используйте /model для просмотра текущей модели"
+            )
+            logger.info(f"Пользователь {user_id} переключился на провайдер Yandex")
+        else:
+            message = "❌ Ошибка при сохранении настроек. Попробуйте позже."
+            logger.error(f"Ошибка сохранения провайдера Yandex для пользователя {user_id}")
+
+        await update.message.reply_text(message)
+
+    async def deepseek_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /deepseek - переключение на DeepSeek."""
+        user_id = update.effective_user.id
+
+        # Проверяем доступность DeepSeek провайдера
+        if not self.deepseek_provider:
+            error_message = (
+                "❌ DeepSeek провайдер недоступен\n\n"
+                "DeepSeek API ключ не был настроен при запуске бота.\n"
+                "Обратитесь к администратору для настройки DEEPSEEK_API_KEY."
+            )
+            await update.message.reply_text(error_message)
+            logger.warning(f"Пользователь {user_id} пытался переключиться на DeepSeek, но провайдер недоступен")
+            return
+
+        # Сохраняем выбор
+        success = self.user_settings.set_provider(user_id, "deepseek")
+
+        if success:
+            message = (
+                "✅ Выбрана модель DeepSeek\n\n"
+                "Теперь я буду использовать DeepSeek для генерации ответов.\n\n"
+                "Используемая модель: deepseek-chat\n"
+                "Используйте /openai для переключения на OpenAI GPT\n"
+                "Используйте /yandex для переключения на Yandex GPT\n"
+                "Используйте /model для просмотра текущей модели"
+            )
+            logger.info(f"Пользователь {user_id} переключился на провайдер DeepSeek")
+        else:
+            message = "❌ Ошибка при сохранении настроек. Попробуйте позже."
+            logger.error(f"Ошибка сохранения провайдера DeepSeek для пользователя {user_id}")
+
+        await update.message.reply_text(message)
+
+    async def model_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /model - показать текущую выбранную модель."""
+        user_id = update.effective_user.id
+
+        # Получаем текущий провайдер
+        provider = self.user_settings.get_provider(user_id)
+
+        if provider == "openai":
+            if self.openai_provider:
+                message = (
+                    "🤖 Текущая модель: OpenAI GPT\n\n"
+                    "Модель: gpt-3.5-turbo\n"
+                    "Провайдер: OpenAI\n\n"
+                    "Альтернативы:\n"
+                    "/yandex - Yandex GPT\n"
+                    "/deepseek - DeepSeek"
+                )
+            else:
+                message = (
+                    "⚠️ Выбрана модель OpenAI GPT, но провайдер недоступен\n\n"
+                    "Переключаюсь на Yandex GPT..."
+                )
+                self.user_settings.set_provider(user_id, "yandex")
+        elif provider == "deepseek":
+            if self.deepseek_provider:
+                message = (
+                    "🤖 Текущая модель: DeepSeek\n\n"
+                    "Модель: deepseek-chat\n"
+                    "Провайдер: DeepSeek\n\n"
+                    "Альтернативы:\n"
+                    "/openai - OpenAI GPT\n"
+                    "/yandex - Yandex GPT"
+                )
+            else:
+                message = (
+                    "⚠️ Выбрана модель DeepSeek, но провайдер недоступен\n\n"
+                    "Переключаюсь на Yandex GPT..."
+                )
+                self.user_settings.set_provider(user_id, "yandex")
+        else:  # yandex
+            message = (
+                "🤖 Текущая модель: Yandex GPT\n\n"
+                "Модель: yandexgpt-lite\n"
+                "Провайдер: Yandex Cloud\n\n"
+                "Альтернативы:\n"
+                "/openai - OpenAI GPT\n"
+                "/deepseek - DeepSeek"
+            )
+
+        await update.message.reply_text(message)
+        logger.info(f"Пользователь {user_id} проверил текущую модель: {provider}")
+
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Обработчик ошибок для логирования и уведомления пользователя.
+
+        Args:
+            update: Объект обновления (может быть None)
+            context: Контекст с информацией об ошибке
+        """
+        # Логируем ошибку
+        logger.error("Произошла ошибка при обработке обновления:", exc_info=context.error)
+
+        # Специальная обработка для сетевых ошибок
+        from telegram.error import TimedOut, NetworkError
+
+        if isinstance(context.error, (TimedOut, NetworkError)):
+            logger.warning(
+                f"Сетевая ошибка: {context.error.__class__.__name__}. "
+                "Возможны проблемы с интернет-соединением."
+            )
+            # Не отправляем сообщение пользователю при таймауте,
+            # т.к. это может вызвать новый таймаут
+            return
+
+        # Для других ошибок пытаемся уведомить пользователя
+        if update and isinstance(update, Update) and update.effective_message:
+            try:
+                await update.effective_message.reply_text(
+                    "⚠️ Произошла ошибка при обработке вашего запроса.\n"
+                    "Пожалуйста, попробуйте еще раз через несколько секунд."
+                )
+            except Exception as e:
+                # Если не удалось отправить сообщение об ошибке, просто логируем
+                logger.error(f"Не удалось отправить сообщение об ошибке: {e}")
+
     def run(self) -> None:
         """Запуск бота."""
         logger.info("Запуск Telegram бота...")
-        self.application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # В версии 22+ run_polling() автоматически инициализирует и останавливает приложение
+        # Добавляем параметры для более корректной обработки ошибок
+        self.application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True  # Игнорируем старые обновления при запуске
+        )
 
 
-def validate_environment() -> tuple[str, str]:
+def validate_environment() -> tuple[str, str, Optional[str], Optional[str]]:
     """
     Проверка наличия необходимых переменных окружения.
 
     Returns:
-        Кортеж (telegram_token, yandex_api_key)
+        Кортеж (telegram_token, yandex_api_key, openai_api_key, deepseek_api_key)
 
     Raises:
         ValueError: Если не заданы необходимые переменные окружения
     """
     telegram_token = os.getenv("TELEGRAM_TOKEN")
     yandex_api_key = os.getenv("YANDEX_API_KEY")
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
 
     if not telegram_token:
         raise ValueError(
@@ -915,7 +1319,19 @@ def validate_environment() -> tuple[str, str]:
             "YANDEX_FOLDER_ID не задан! Может потребоваться для корректной работы с Yandex GPT."
         )
 
-    return telegram_token, yandex_api_key
+    # Опциональная проверка OPENAI_API_KEY
+    if not openai_api_key:
+        logger.warning(
+            "OPENAI_API_KEY не задан! OpenAI провайдер будет недоступен."
+        )
+
+    # Опциональная проверка DEEPSEEK_API_KEY
+    if not deepseek_api_key:
+        logger.warning(
+            "DEEPSEEK_API_KEY не задан! DeepSeek провайдер будет недоступен."
+        )
+
+    return telegram_token, yandex_api_key, openai_api_key, deepseek_api_key
 
 
 def main() -> None:
@@ -930,10 +1346,10 @@ def main() -> None:
             logger.info("python-dotenv не установлен, используются системные переменные окружения")
 
         # Валидация переменных окружения
-        telegram_token, yandex_api_key = validate_environment()
+        telegram_token, yandex_api_key, openai_api_key, deepseek_api_key = validate_environment()
 
         # Создание и запуск бота
-        bot = TelegramBot(telegram_token, yandex_api_key)
+        bot = TelegramBot(telegram_token, yandex_api_key, openai_api_key, deepseek_api_key)
         bot.run()
 
     except ValueError as e:
