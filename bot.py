@@ -26,11 +26,18 @@ from format_manager import FormatManager
 from prompts import SYSTEM_PROMPT_DEFAULT, SYSTEM_PROMPT_JSON, SYSTEM_PROMPT_XML
 from temperature_tester import TemperatureTester
 from database import MemoryManager
-from mcp_client import MCPClient, get_weather_mcp_config, get_github_mcp_config
+from mcp_client import MCPClient, get_weather_mcp_config, get_github_mcp_config, get_telegram_assistant_mcp_config
 
 # Импорт провайдеров LLM и хранилища настроек
 from providers import OpenAIProvider, YandexGPTProvider, DeepSeekProvider
 from storage import UserSettings
+
+# Импорт системы автоматических сводок
+from storage import Database as AssistantDatabase
+from scheduler import SchedulerManager
+
+# Импорт FSM обработчиков
+from fsm_handlers import get_assistant_creation_handler
 
 # Настройка логирования
 logging.basicConfig(
@@ -249,6 +256,51 @@ class TelegramBot:
         self.memory.create_tables()
         logger.info("Система памяти инициализирована")
 
+        # Система автоматических сводок из Telegram чатов
+        self.assistant_db = None
+        self.scheduler_manager = None
+        self.telegram_assistant_mcp_client = None
+
+        if deepseek_api_key:
+            try:
+                # Инициализация базы данных для ассистентов
+                self.assistant_db = AssistantDatabase("data/assistants.db")
+                self.assistant_db.create_tables()
+                logger.info("База данных ассистентов инициализирована")
+
+                # Создание MCP клиента для Telegram Assistant (только для DeepSeek)
+                try:
+                    telegram_config = get_telegram_assistant_mcp_config()
+                    self.telegram_assistant_mcp_client = MCPClient(telegram_config)
+                    logger.info("Telegram Assistant MCP клиент создан для DeepSeek Provider")
+                except Exception as e:
+                    logger.warning(f"Не удалось создать Telegram Assistant MCP клиент: {e}. Функции автоматических сводок будут недоступны.")
+                    self.telegram_assistant_mcp_client = None
+
+                # Создание Scheduler Manager для управления ассистентами
+                if self.deepseek_provider:
+                    # Подключаем telegram_assistant MCP к DeepSeek провайдеру
+                    if self.telegram_assistant_mcp_client:
+                        # Добавляем Telegram Assistant MCP клиент к DeepSeek
+                        # DeepSeek будет иметь доступ и к GitHub, и к Telegram Assistant tools
+                        self.deepseek_provider.add_mcp_client(self.telegram_assistant_mcp_client)
+                        logger.info("DeepSeek Provider настроен с GitHub и Telegram Assistant MCP tools")
+
+                    self.scheduler_manager = SchedulerManager(
+                        database=self.assistant_db,
+                        llm_provider=self.deepseek_provider,
+                        telegram_bot_instance=self
+                    )
+                    logger.info("Scheduler Manager инициализирован")
+                else:
+                    logger.warning("DeepSeek Provider не инициализирован, Scheduler Manager не будет создан")
+
+            except Exception as e:
+                logger.error(f"Ошибка инициализации системы автоматических сводок: {e}", exc_info=True)
+                self.scheduler_manager = None
+        else:
+            logger.info("DeepSeek API не настроен, система автоматических сводок недоступна")
+
         # Регистрация обработчиков команд
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
@@ -276,6 +328,22 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("yandex", self.yandex_command))
         self.application.add_handler(CommandHandler("deepseek", self.deepseek_command))
         self.application.add_handler(CommandHandler("model", self.model_command))
+
+        # Команды управления автоматическими сводками (только если Scheduler Manager доступен)
+        if self.scheduler_manager:
+            # FSM для создания ассистента с настройкой параметров
+            assistant_creation_handler = get_assistant_creation_handler(self.scheduler_manager)
+            self.application.add_handler(assistant_creation_handler)
+            logger.info("FSM обработчик создания ассистента зарегистрирован")
+
+            # Простая команда для быстрого создания (без настроек)
+            self.application.add_handler(CommandHandler("telegram_assistant", self.telegram_assistant_command))
+            self.application.add_handler(CommandHandler("stop_assistant", self.stop_assistant_command))
+            self.application.add_handler(CommandHandler("stop_all_assistants", self.stop_all_assistants_command))
+            self.application.add_handler(CommandHandler("list_assistants", self.list_assistants_command))
+            self.application.add_handler(CommandHandler("delete_assistant", self.delete_assistant_command))
+            self.application.add_handler(CommandHandler("delete_all_assistants", self.delete_all_assistants_command))
+            logger.info("Команды управления ассистентами зарегистрированы")
 
         # Обработчик ошибок
         self.application.add_error_handler(self.error_handler)
@@ -316,8 +384,22 @@ class TelegramBot:
             "• Информация о пользователях GitHub\n"
             "• Списки репозиториев\n"
             "• История коммитов\n\n"
-            "❓ Используй /help для полной справки."
         )
+
+        # Добавляем информацию о системе автоматических сводок, если доступна
+        if self.scheduler_manager:
+            welcome_message += (
+                "📊 Автоматические сводки из Telegram:\n"
+                "/create_assistant - Создать ассистента (с настройками)\n"
+                "/telegram_assistant <chat_id> - Быстрое создание\n"
+                "/list_assistants - Список ассистентов\n"
+                "/stop_assistant <chat> - Остановить ассистента\n"
+                "/delete_assistant <chat> - Удалить ассистента\n"
+                "/delete_all_assistants confirm - Удалить все\n\n"
+            )
+
+        welcome_message += "❓ Используй /help для полной справки."
+
         await update.message.reply_text(welcome_message)
         logger.info(f"Пользователь {user_id} начал диалог")
 
@@ -1265,6 +1347,231 @@ class TelegramBot:
         await update.message.reply_text(message)
         logger.info(f"Пользователь {user_id} проверил текущую модель: {provider}")
 
+    async def telegram_assistant_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /telegram_assistant - создание ассистента (упрощенная версия)."""
+        user_id = update.effective_user.id
+
+        if not self.scheduler_manager:
+            await update.message.reply_text(
+                "❌ Система автоматических сводок недоступна.\n\n"
+                "Для использования этой функции необходимо:\n"
+                "1. Настроить DEEPSEEK_API_KEY в .env\n"
+                "2. Настроить TELEGRAM_API_ID и TELEGRAM_API_HASH\n"
+                "3. Запустить MCP сервер: python mcp_server/telegram_assistant.py"
+            )
+            return
+
+        # Простая реализация: парсим аргументы напрямую
+        if not context.args or len(context.args) == 0:
+            await update.message.reply_text(
+                "❌ Укажите название чата.\n\n"
+                "Использование: /telegram_assistant <chat_id>\n\n"
+                "Примеры:\n"
+                "• /telegram_assistant @channel_name\n"
+                "• /telegram_assistant -1001234567890"
+            )
+            return
+
+        chat_id = context.args[0]
+        chat_name = chat_id
+
+        # Значения по умолчанию
+        interval_type = "hour"
+        interval_value = 1
+        custom_prompt = None
+
+        await update.message.reply_text(
+            f"⏳ Создаю ассистента для чата '{chat_id}'...\n\n"
+            f"Настройки по умолчанию:\n"
+            f"• Интервал: каждый час\n"
+            f"• Промпт: стандартный"
+        )
+
+        # Создание ассистента
+        success, message, assistant = await self.scheduler_manager.create_assistant(
+            user_id=user_id,
+            chat_id=chat_id,
+            chat_name=chat_name,
+            interval_type=interval_type,
+            interval_value=interval_value,
+            custom_prompt=custom_prompt
+        )
+
+        if success and assistant:
+            response = (
+                f"✅ Ассистент для чата '{chat_name}' создан!\n\n"
+                f"📊 Интервал: каждый час\n"
+                f"⏰ Первый запуск: скоро\n"
+                f"🆔 ID: {assistant.assistant_id[:8]}...\n\n"
+                f"Используйте /list_assistants для просмотра всех ассистентов"
+            )
+        else:
+            response = f"❌ {message}"
+
+        await update.message.reply_text(response)
+        logger.info(f"Команда /telegram_assistant от пользователя {user_id}: {message}")
+
+    async def stop_assistant_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /stop_assistant - остановка ассистента."""
+        user_id = update.effective_user.id
+
+        if not self.scheduler_manager:
+            await update.message.reply_text("❌ Система автоматических сводок недоступна")
+            return
+
+        if not context.args or len(context.args) == 0:
+            await update.message.reply_text(
+                "❌ Укажите название чата.\n\n"
+                "Использование: /stop_assistant <chat_name>"
+            )
+            return
+
+        chat_name = " ".join(context.args)
+
+        success, message = await self.scheduler_manager.stop_assistant(user_id, chat_name)
+
+        if success:
+            response = f"✅ {message}"
+        else:
+            response = f"❌ {message}"
+
+        await update.message.reply_text(response)
+        logger.info(f"Команда /stop_assistant от пользователя {user_id}: {message}")
+
+    async def stop_all_assistants_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /stop_all_assistants - остановка всех ассистентов."""
+        user_id = update.effective_user.id
+
+        if not self.scheduler_manager:
+            await update.message.reply_text("❌ Система автоматических сводок недоступна")
+            return
+
+        # Запрос подтверждения
+        if not context.args or context.args[0].lower() != "confirm":
+            active_count = self.assistant_db.count_user_active_assistants(user_id)
+
+            if active_count == 0:
+                await update.message.reply_text("ℹ️ У вас нет активных ассистентов")
+                return
+
+            await update.message.reply_text(
+                f"⚠️ Вы уверены, что хотите остановить все ассистенты ({active_count})?\n\n"
+                f"Для подтверждения используйте:\n"
+                f"/stop_all_assistants confirm"
+            )
+            return
+
+        success, message, stopped = await self.scheduler_manager.stop_all_assistants(user_id)
+
+        if success and stopped:
+            response = f"✅ {message}\n\n" + "\n".join([f"• {name}" for name in stopped])
+        elif success:
+            response = f"ℹ️ {message}"
+        else:
+            response = f"❌ {message}"
+
+        await update.message.reply_text(response)
+        logger.info(f"Команда /stop_all_assistants от пользователя {user_id}: {message}")
+
+    async def list_assistants_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /list_assistants - список всех ассистентов."""
+        user_id = update.effective_user.id
+
+        if not self.scheduler_manager:
+            await update.message.reply_text("❌ Система автоматических сводок недоступна")
+            return
+
+        assistants = self.scheduler_manager.list_assistants(user_id)
+
+        if not assistants:
+            await update.message.reply_text(
+                "📭 У вас пока нет ассистентов\n\n"
+                "Создайте первого ассистента:\n"
+                "/telegram_assistant <chat_id>"
+            )
+            return
+
+        # Подсчёт активных
+        active_count = sum(1 for a in assistants if a['status'] == 'active')
+
+        response = f"📋 Ваши ассистенты ({len(assistants)}, активных: {active_count}):\n\n"
+
+        for idx, assistant in enumerate(assistants, 1):
+            status_emoji = "✅" if assistant['status'] == 'active' else "⏸️"
+
+            response += f"{idx}. {status_emoji} {assistant['chat_name']}\n"
+            response += f"   📊 {assistant['interval']}\n"
+            response += f"   ⏰ Следующий запуск: {assistant['next_run']}\n"
+            response += f"   🆔 ID: {assistant['assistant_id']}\n\n"
+
+        await update.message.reply_text(response)
+        logger.info(f"Команда /list_assistants от пользователя {user_id}: показано {len(assistants)} ассистентов")
+
+    async def delete_assistant_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /delete_assistant - удаление ассистента."""
+        user_id = update.effective_user.id
+
+        if not self.scheduler_manager:
+            await update.message.reply_text("❌ Система автоматических сводок недоступна")
+            return
+
+        if not context.args or len(context.args) == 0:
+            await update.message.reply_text(
+                "❌ Укажите название чата.\n\n"
+                "Использование: /delete_assistant <chat_name>"
+            )
+            return
+
+        chat_name = " ".join(context.args)
+
+        success, message = await self.scheduler_manager.delete_assistant(user_id, chat_name)
+
+        if success:
+            response = f"✅ {message}"
+        else:
+            response = f"❌ {message}"
+
+        await update.message.reply_text(response)
+        logger.info(f"Команда /delete_assistant от пользователя {user_id}: {message}")
+
+    async def delete_all_assistants_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /delete_all_assistants - удаление всех ассистентов."""
+        user_id = update.effective_user.id
+
+        if not self.scheduler_manager:
+            await update.message.reply_text("❌ Система автоматических сводок недоступна")
+            return
+
+        # Запрос подтверждения
+        if not context.args or context.args[0].lower() != "confirm":
+            all_assistants = self.assistant_db.get_user_assistants(user_id)
+
+            if not all_assistants:
+                await update.message.reply_text("ℹ️ У вас нет ассистентов")
+                return
+
+            await update.message.reply_text(
+                f"⚠️ Вы уверены, что хотите УДАЛИТЬ все ассистенты ({len(all_assistants)})?‌\n\n"
+                f"Это действие необратимо! Будут удалены:\n"
+                f"• Все настройки ассистентов\n"
+                f"• История выполнения\n\n"
+                f"Для подтверждения используйте:\n"
+                f"/delete_all_assistants confirm"
+            )
+            return
+
+        success, message, deleted = await self.scheduler_manager.delete_all_assistants(user_id)
+
+        if success and deleted:
+            response = f"✅ {message}\n\n" + "\n".join([f"• {name}" for name in deleted])
+        elif success:
+            response = f"ℹ️ {message}"
+        else:
+            response = f"❌ {message}"
+
+        await update.message.reply_text(response)
+        logger.info(f"Команда /delete_all_assistants от пользователя {user_id}: {message}")
+
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         Обработчик ошибок для логирования и уведомления пользователя.
@@ -1302,27 +1609,68 @@ class TelegramBot:
     async def _startup(self, application: Application) -> None:
         """
         Асинхронная инициализация при запуске бота.
-        Подключение к GitHub MCP серверу для DeepSeek.
+        Подключение к MCP серверам и запуск Scheduler Manager.
         """
+        # Подключение к GitHub MCP для DeepSeek
         if self.github_mcp_client:
             try:
                 logger.info("Подключение к GitHub MCP серверу...")
                 connected = await self.github_mcp_client.connect()
                 if connected:
                     logger.info("✅ GitHub MCP сервер успешно подключен для DeepSeek")
-                    # Проверяем доступные tools
                     tools = await self.github_mcp_client.list_tools()
                     logger.info(f"Доступно {len(tools)} GitHub MCP tools: {[t['name'] for t in tools]}")
                 else:
-                    logger.warning("❌ Не удалось подключиться к GitHub MCP серверу. DeepSeek будет работать без MCP tools.")
+                    logger.warning("❌ Не удалось подключиться к GitHub MCP серверу")
             except Exception as e:
                 logger.error(f"Ошибка при подключении к GitHub MCP серверу: {e}", exc_info=True)
+
+        # Подключение к Telegram Assistant MCP для DeepSeek
+        if self.telegram_assistant_mcp_client:
+            try:
+                logger.info("Подключение к Telegram Assistant MCP серверу...")
+                connected = await self.telegram_assistant_mcp_client.connect()
+                if connected:
+                    logger.info("✅ Telegram Assistant MCP сервер успешно подключен для DeepSeek")
+                    tools = await self.telegram_assistant_mcp_client.list_tools()
+                    logger.info(f"Доступно {len(tools)} Telegram Assistant MCP tools: {[t['name'] for t in tools]}")
+                else:
+                    logger.warning("❌ Не удалось подключиться к Telegram Assistant MCP серверу")
+            except Exception as e:
+                logger.error(f"Ошибка при подключении к Telegram Assistant MCP серверу: {e}", exc_info=True)
+
+        # Запуск Scheduler Manager и восстановление ассистентов
+        if self.scheduler_manager:
+            try:
+                logger.info("Запуск Scheduler Manager...")
+                self.scheduler_manager.start()
+                logger.info("✅ Scheduler Manager запущен")
+
+                # Восстановление активных ассистентов после перезапуска
+                logger.info("Восстановление активных ассистентов...")
+                restored_count = await self.scheduler_manager.restore_assistants()
+                if restored_count > 0:
+                    logger.info(f"✅ Восстановлено {restored_count} активных ассистентов")
+                else:
+                    logger.info("Нет активных ассистентов для восстановления")
+            except Exception as e:
+                logger.error(f"Ошибка при запуске Scheduler Manager: {e}", exc_info=True)
 
     async def _shutdown(self, application: Application) -> None:
         """
         Асинхронное завершение при остановке бота.
-        Отключение от GitHub MCP сервера.
+        Отключение от MCP серверов и остановка Scheduler Manager.
         """
+        # Остановка Scheduler Manager
+        if self.scheduler_manager:
+            try:
+                logger.info("Остановка Scheduler Manager...")
+                self.scheduler_manager.shutdown()
+                logger.info("✅ Scheduler Manager остановлен")
+            except Exception as e:
+                logger.error(f"Ошибка при остановке Scheduler Manager: {e}", exc_info=True)
+
+        # Отключение от GitHub MCP
         if self.github_mcp_client and self.github_mcp_client.is_connected():
             try:
                 logger.info("Отключение от GitHub MCP сервера...")
@@ -1330,6 +1678,15 @@ class TelegramBot:
                 logger.info("✅ GitHub MCP сервер отключен")
             except Exception as e:
                 logger.error(f"Ошибка при отключении от GitHub MCP сервера: {e}", exc_info=True)
+
+        # Отключение от Telegram Assistant MCP
+        if self.telegram_assistant_mcp_client and self.telegram_assistant_mcp_client.is_connected():
+            try:
+                logger.info("Отключение от Telegram Assistant MCP сервера...")
+                await self.telegram_assistant_mcp_client.disconnect()
+                logger.info("✅ Telegram Assistant MCP сервер отключен")
+            except Exception as e:
+                logger.error(f"Ошибка при отключении от Telegram Assistant MCP сервера: {e}", exc_info=True)
 
     def run(self) -> None:
         """Запуск бота."""

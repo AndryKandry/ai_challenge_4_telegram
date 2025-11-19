@@ -478,3 +478,28 @@ def get_github_stdio_mcp_config() -> Dict[str, Any]:
         "args": [str(github_server_path), "--stdio"],
         "env": {}
     }
+
+
+def get_telegram_assistant_mcp_config() -> Dict[str, Any]:
+    """
+    Получение конфигурации для Telegram Assistant MCP сервера.
+
+    Telegram Assistant MCP сервер предоставляет инструменты для работы с Telegram API:
+    - get_chat_messages: получение сообщений из чата за период
+    - get_chat_info: получение информации о чате
+    - validate_chat_access: проверка доступа к чату
+
+    Используется HTTP/SSE транспорт (аналогично GitHub MCP) для стабильности.
+
+    Для работы нужно:
+    1. Запустить сервер отдельно: python mcp_server/telegram_assistant.py
+    2. Настроить TELEGRAM_API_ID и TELEGRAM_API_HASH в .env
+
+    Returns:
+        Словарь с конфигурацией для подключения к Telegram Assistant MCP серверу
+    """
+    return {
+        "type": "http",
+        "url": "http://localhost:8002/sse",
+        "headers": {}
+    }

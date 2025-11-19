@@ -48,12 +48,19 @@ class DeepSeekProvider(LLMProvider):
             timeout: Таймаут запроса в секундах
             temperature: Температура генерации (0.0-2.0)
             max_tokens: Максимальное количество токенов в ответе
-            mcp_client: MCP клиент для вызова инструментов (опционально)
+            mcp_client: MCP клиент для вызова инструментов (опционально, deprecated - используйте mcp_clients)
         """
         super().__init__(api_key, timeout)
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+
+        # Поддержка множественных MCP клиентов
+        self.mcp_clients = []
+        if mcp_client:
+            self.mcp_clients.append(mcp_client)
+
+        # Обратная совместимость
         self.mcp_client = mcp_client
 
         # Создаём асинхронный клиент с кастомным base_url для DeepSeek
@@ -98,9 +105,9 @@ class DeepSeekProvider(LLMProvider):
             # Добавляем текущее сообщение пользователя
             messages.append({"role": "user", "content": user_message})
 
-            # Получаем список доступных tools из MCP (если есть)
+            # Получаем список доступных tools из всех MCP клиентов
             tools = None
-            if self.mcp_client and self.mcp_client.is_connected():
+            if self.mcp_clients:
                 tools = await self._get_mcp_tools_definitions()
 
             logger.info(f"Отправка запроса в DeepSeek API (модель: {self.model})")
@@ -248,32 +255,36 @@ class DeepSeekProvider(LLMProvider):
 
     async def _get_mcp_tools_definitions(self) -> List[Dict[str, Any]]:
         """
-        Получение определений MCP tools в формате OpenAI function calling.
+        Получение определений MCP tools в формате OpenAI function calling от всех MCP клиентов.
 
         Returns:
             Список определений tools для DeepSeek API
         """
-        if not self.mcp_client or not self.mcp_client.is_connected():
+        if not self.mcp_clients:
             return []
 
+        tools_definitions = []
+
         try:
-            # Получаем список tools от MCP сервера
-            mcp_tools = await self.mcp_client.list_tools()
+            # Собираем tools от всех подключенных MCP клиентов
+            for mcp_client in self.mcp_clients:
+                if mcp_client and mcp_client.is_connected():
+                    # Получаем список tools от MCP сервера
+                    mcp_tools = await mcp_client.list_tools()
 
-            # Конвертируем в формат OpenAI tools
-            tools_definitions = []
-            for tool in mcp_tools:
-                tool_def = {
-                    "type": "function",
-                    "function": {
-                        "name": tool["name"],
-                        "description": tool["description"],
-                        "parameters": tool.get("inputSchema", {})
-                    }
-                }
-                tools_definitions.append(tool_def)
+                    # Конвертируем в формат OpenAI tools
+                    for tool in mcp_tools:
+                        tool_def = {
+                            "type": "function",
+                            "function": {
+                                "name": tool["name"],
+                                "description": tool["description"],
+                                "parameters": tool.get("inputSchema", {})
+                            }
+                        }
+                        tools_definitions.append(tool_def)
 
-            logger.debug(f"Сформировано {len(tools_definitions)} определений tools для DeepSeek")
+            logger.debug(f"Сформировано {len(tools_definitions)} определений tools для DeepSeek от {len(self.mcp_clients)} MCP клиентов")
             return tools_definitions
 
         except Exception as e:
@@ -304,19 +315,32 @@ class DeepSeekProvider(LLMProvider):
 
                 logger.info(f"Вызов MCP tool: {tool_name} с аргументами: {tool_args}")
 
-                # Вызываем tool через MCP клиент
-                if self.mcp_client and self.mcp_client.is_connected():
-                    result = await self.mcp_client.call_tool(tool_name, tool_args)
+                # Ищем MCP клиент, который имеет данный tool
+                tool_executed = False
+                for mcp_client in self.mcp_clients:
+                    if mcp_client and mcp_client.is_connected():
+                        # Проверяем, есть ли у этого клиента данный tool
+                        client_tools = await mcp_client.list_tools()
+                        tool_names = [t["name"] for t in client_tools]
 
-                    if result:
-                        logger.info(f"Tool {tool_name} выполнен успешно")
-                        results.append((tool_call_id, tool_name, result))
-                    else:
-                        error_msg = f"Tool {tool_name} не вернул результат"
-                        logger.error(error_msg)
-                        results.append((tool_call_id, tool_name, f"❌ {error_msg}"))
-                else:
-                    error_msg = "MCP клиент не подключен"
+                        if tool_name in tool_names:
+                            # Вызываем tool через этот MCP клиент
+                            result = await mcp_client.call_tool(tool_name, tool_args)
+
+                            if result:
+                                logger.info(f"Tool {tool_name} выполнен успешно через MCP клиент")
+                                results.append((tool_call_id, tool_name, result))
+                                tool_executed = True
+                                break
+                            else:
+                                error_msg = f"Tool {tool_name} не вернул результат"
+                                logger.error(error_msg)
+                                results.append((tool_call_id, tool_name, f"❌ {error_msg}"))
+                                tool_executed = True
+                                break
+
+                if not tool_executed:
+                    error_msg = f"MCP клиент с tool '{tool_name}' не найден или не подключен"
                     logger.error(error_msg)
                     results.append((tool_call_id, tool_name, f"❌ {error_msg}"))
 
@@ -334,10 +358,23 @@ class DeepSeekProvider(LLMProvider):
 
     def set_mcp_client(self, mcp_client: Any) -> None:
         """
-        Установка MCP клиента для провайдера.
+        Установка MCP клиента для провайдера (deprecated - используйте add_mcp_client).
 
         Args:
             mcp_client: Экземпляр MCPClient
         """
         self.mcp_client = mcp_client
+        if mcp_client and mcp_client not in self.mcp_clients:
+            self.mcp_clients.append(mcp_client)
         logger.info("MCP клиент установлен для DeepSeek Provider")
+
+    def add_mcp_client(self, mcp_client: Any) -> None:
+        """
+        Добавление MCP клиента к списку клиентов провайдера.
+
+        Args:
+            mcp_client: Экземпляр MCPClient
+        """
+        if mcp_client and mcp_client not in self.mcp_clients:
+            self.mcp_clients.append(mcp_client)
+            logger.info(f"MCP клиент добавлен к DeepSeek Provider (всего: {len(self.mcp_clients)})")

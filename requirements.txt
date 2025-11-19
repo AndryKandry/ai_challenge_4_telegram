@@ -17,3 +17,18 @@ mcp>=1.21.0
 
 # FastMCP - высокоуровневый фреймворк для создания MCP серверов
 fastmcp>=2.13.0
+
+# Новые зависимости для системы автоматических сводок
+
+# APScheduler для планирования задач
+apscheduler==3.10.4
+
+# Pyrogram для работы с Telegram API (User Bot)
+pyrogram==2.0.106
+tgcrypto==1.2.5
+
+# Tenacity для retry логики
+tenacity==8.2.3
+
+# aiosqlite для асинхронной работы с SQLite
+aiosqlite==0.19.0
