@@ -26,7 +26,7 @@ from format_manager import FormatManager
 from prompts import SYSTEM_PROMPT_DEFAULT, SYSTEM_PROMPT_JSON, SYSTEM_PROMPT_XML
 from temperature_tester import TemperatureTester
 from database import MemoryManager
-from mcp_client import MCPClient, get_weather_mcp_config, get_github_mcp_config, get_telegram_assistant_mcp_config
+from mcp_client import MCPClient, get_weather_mcp_config, get_github_mcp_config, get_telegram_assistant_mcp_config, get_filesystem_mcp_config
 
 # Импорт провайдеров LLM и хранилища настроек
 from providers import OpenAIProvider, YandexGPTProvider, DeepSeekProvider
@@ -207,9 +207,10 @@ class TelegramBot:
         else:
             logger.warning("OPENAI_API_KEY не задан, OpenAI провайдер недоступен")
 
-        # Инициализация DeepSeek с MCP клиентом (только для DeepSeek)
+        # Инициализация DeepSeek с MCP клиентами (только для DeepSeek)
         self.deepseek_provider = None
         self.github_mcp_client = None
+        self.filesystem_mcp_client = None
         if deepseek_api_key:
             # Создаём MCP клиент для GitHub (только для DeepSeek)
             try:
@@ -217,11 +218,26 @@ class TelegramBot:
                 self.github_mcp_client = MCPClient(github_config)
                 logger.info("GitHub MCP клиент создан для DeepSeek Provider")
             except Exception as e:
-                logger.warning(f"Не удалось создать GitHub MCP клиент: {e}. DeepSeek будет работать без MCP tools.")
+                logger.warning(f"Не удалось создать GitHub MCP клиент: {e}. DeepSeek будет работать без GitHub MCP tools.")
                 self.github_mcp_client = None
 
-            # Создаём DeepSeek провайдер с MCP клиентом
+            # Создаём MCP клиент для Filesystem (только для DeepSeek)
+            try:
+                filesystem_config = get_filesystem_mcp_config()
+                self.filesystem_mcp_client = MCPClient(filesystem_config)
+                logger.info("Filesystem MCP клиент создан для DeepSeek Provider")
+            except Exception as e:
+                logger.warning(f"Не удалось создать Filesystem MCP клиент: {e}. DeepSeek будет работать без Filesystem MCP tools.")
+                self.filesystem_mcp_client = None
+
+            # Создаём DeepSeek провайдер с MCP клиентом для GitHub (обратная совместимость)
             self.deepseek_provider = DeepSeekProvider(deepseek_api_key, mcp_client=self.github_mcp_client)
+
+            # Добавляем Filesystem MCP клиент к DeepSeek провайдеру
+            if self.filesystem_mcp_client:
+                self.deepseek_provider.add_mcp_client(self.filesystem_mcp_client)
+                logger.info("Filesystem MCP клиент добавлен к DeepSeek Provider")
+
             logger.info("DeepSeek Provider инициализирован")
         else:
             logger.warning("DEEPSEEK_API_KEY не задан, DeepSeek провайдер недоступен")
@@ -378,12 +394,18 @@ class TelegramBot:
             "🧪 Тестирование:\n"
             "/test_temperature - Сравнить работу LLM при разных температурах\n\n"
             "🛠 MCP Инструменты:\n"
-            "/mcp_tools - Показать доступные инструменты (погода)\n\n"
+            "/mcp_tools - Показать доступные инструменты\n\n"
             "🔧 GitHub Integration (только для DeepSeek):\n"
             "При использовании DeepSeek вы можете задавать вопросы о GitHub:\n"
             "• Информация о пользователях GitHub\n"
             "• Списки репозиториев\n"
             "• История коммитов\n\n"
+            "📁 Filesystem Integration (только для DeepSeek):\n"
+            "DeepSeek может работать с вашей файловой системой:\n"
+            "• Читать файлы и директории\n"
+            "• Создавать и редактировать файлы\n"
+            "• Сохранять результаты в файлы\n"
+            "Пример: \"Сохрани информацию о torvalds в файл ~/info.txt\"\n\n"
         )
 
         # Добавляем информацию о системе автоматических сводок, если доступна
@@ -456,13 +478,24 @@ class TelegramBot:
             "• \"Покажи последние коммиты в репозитории facebook/react\"\n"
             "• \"Расскажи о пользователе microsoft и покажи его репозитории\"\n\n"
             "DeepSeek автоматически вызовет нужные инструменты и сформирует ответ.\n\n"
+            "📁 Filesystem Integration (только для DeepSeek):\n"
+            "При использовании DeepSeek модели, бот может работать с файловой системой.\n"
+            "Доступные операции на естественном языке:\n"
+            "• \"Прочитай файл ~/Documents/notes.txt\"\n"
+            "• \"Создай файл ~/todo.txt со списком задач\"\n"
+            "• \"Покажи содержимое директории ~/Documents\"\n"
+            "• \"Сохрани информацию о torvalds в файл ~/github_info.txt\"\n"
+            "• \"Отредактируй файл ~/config.txt и добавь строку\"\n\n"
+            "DeepSeek автоматически выберет нужные инструменты для работы с файлами.\n"
+            "Поддерживаются пайплайны: GitHub → обработка → сохранение в файл.\n\n"
             "💡 Как работают сессии:\n"
             "• Сессия автоматически создается при первом сообщении\n"
             "• Бот помнит последние 10 сообщений из текущей сессии\n"
             "• Используйте /new_session для начала нового диалога\n"
             "• Используйте /end_session для сброса контекста\n\n"
-            "⚠️ Примечание: Я не могу выполнять команды, искать в интернете "
-            "или обрабатывать файлы. Только текстовые ответы!"
+            "⚠️ Примечание о возможностях:\n"
+            "• OpenAI и Yandex GPT: только текстовые ответы\n"
+            "• DeepSeek: + работа с GitHub и файловой системой"
         )
         await update.message.reply_text(help_message)
         logger.info(f"Пользователь {update.effective_user.id} запросил справку")
@@ -1104,73 +1137,113 @@ class TelegramBot:
         """
         Обработчик команды /mcp_tools - получение списка доступных MCP инструментов.
 
-        Подключается к локальному Weather MCP серверу и выводит список всех доступных инструментов.
+        Показывает все MCP инструменты, доступные для DeepSeek провайдера.
         """
         user_id = update.effective_user.id
         logger.info(f"Пользователь {user_id} запросил список MCP инструментов")
 
         # Отправка сообщения о начале загрузки
         loading_message = await update.message.reply_text(
-            "🔄 Получаю список доступных MCP инструментов...\n"
-            "Подключение к Weather MCP серверу..."
+            "🔄 Получаю список доступных MCP инструментов для DeepSeek..."
         )
 
         try:
-            # Получение конфигурации Weather MCP
-            mcp_config = get_weather_mcp_config()
-
-            # Создание MCP клиента
-            mcp_client = MCPClient(mcp_config)
-
-            # Подключение к серверу
-            connected = await mcp_client.connect()
-
-            if not connected:
+            # Проверяем, доступен ли DeepSeek провайдер
+            if not self.deepseek_provider:
                 error_message = (
-                    "❌ Ошибка подключения к MCP-серверу\n\n"
-                    "Не удалось установить соединение с Weather MCP сервером.\n\n"
-                    "Возможные причины:\n"
-                    "• Файл mcp_server/weather.py не найден\n"
-                    "• Ошибка запуска Python процесса сервера\n"
-                    "• Отсутствуют необходимые зависимости (mcp, httpx)\n\n"
-                    "Проверьте настройки и попробуйте снова."
+                    "❌ DeepSeek провайдер недоступен\n\n"
+                    "MCP инструменты работают только с DeepSeek.\n"
+                    "Убедитесь, что DEEPSEEK_API_KEY настроен в .env файле."
                 )
                 await loading_message.edit_text(error_message)
                 return
 
-            # Получение списка инструментов
-            tools = await mcp_client.list_tools()
+            # Собираем все инструменты от всех подключенных MCP клиентов
+            all_tools = []
 
-            # Закрытие соединения
-            await mcp_client.disconnect()
+            # GitHub MCP
+            if self.github_mcp_client and self.github_mcp_client.is_connected():
+                try:
+                    github_tools = await self.github_mcp_client.list_tools()
+                    for tool in github_tools:
+                        tool['server'] = 'GitHub MCP'
+                        all_tools.append(tool)
+                except Exception as e:
+                    logger.warning(f"Не удалось получить GitHub MCP tools: {e}")
 
-            if not tools:
+            # Filesystem MCP
+            if self.filesystem_mcp_client and self.filesystem_mcp_client.is_connected():
+                try:
+                    filesystem_tools = await self.filesystem_mcp_client.list_tools()
+                    for tool in filesystem_tools:
+                        tool['server'] = 'Filesystem MCP'
+                        all_tools.append(tool)
+                except Exception as e:
+                    logger.warning(f"Не удалось получить Filesystem MCP tools: {e}")
+
+            # Telegram Assistant MCP (если есть)
+            if self.telegram_assistant_mcp_client and self.telegram_assistant_mcp_client.is_connected():
+                try:
+                    telegram_tools = await self.telegram_assistant_mcp_client.list_tools()
+                    for tool in telegram_tools:
+                        tool['server'] = 'Telegram Assistant MCP'
+                        all_tools.append(tool)
+                except Exception as e:
+                    logger.warning(f"Не удалось получить Telegram Assistant MCP tools: {e}")
+
+            if not all_tools:
                 message = (
                     "📭 Список инструментов пуст\n\n"
-                    "MCP-сервер не предоставил ни одного инструмента.\n"
-                    "Проверьте конфигурацию сервера."
+                    "Нет подключенных MCP серверов для DeepSeek.\n\n"
+                    "Убедитесь, что запущены MCP серверы:\n"
+                    "• GitHub MCP (порт 8001)\n"
+                    "• Filesystem MCP (порт 8003)\n\n"
+                    "Команды для запуска:\n"
+                    "<code>python mcp_server/github.py</code>\n"
+                    "<code>python mcp_server/filesystem.py</code>"
                 )
-                await loading_message.edit_text(message)
+                await loading_message.edit_text(message, parse_mode="HTML")
                 return
 
-            # Форматирование ответа
-            response = "🛠 <b>Доступные MCP инструменты:</b>\n\n"
+            # Форматирование ответа по серверам
+            response = "🛠 <b>Доступные MCP инструменты для DeepSeek:</b>\n\n"
 
-            for idx, tool in enumerate(tools, 1):
-                response += f"{idx}. <b>{tool['name']}</b>\n"
-                response += f"   📝 {tool['description']}\n"
+            # Группировка по серверам
+            servers = {}
+            for tool in all_tools:
+                server_name = tool.get('server', 'Unknown')
+                if server_name not in servers:
+                    servers[server_name] = []
+                servers[server_name].append(tool)
 
-                # Извлечение параметров из inputSchema
-                schema = tool.get('inputSchema', {})
-                if isinstance(schema, dict):
-                    properties = schema.get('properties', {})
-                    if properties:
-                        params = list(properties.keys())
-                        response += f"   ⚙️ Параметры: {', '.join(params)}\n"
+            # Вывод инструментов по серверам
+            for server_name, tools_list in servers.items():
+                response += f"📦 <b>{server_name}</b> ({len(tools_list)} инструментов):\n\n"
 
-                response += "\n"
+                for idx, tool in enumerate(tools_list, 1):
+                    response += f"{idx}. <b>{tool['name']}</b>\n"
 
-            response += f"📊 Всего инструментов: {len(tools)}"
+                    # Описание (обрезаем если слишком длинное)
+                    description = tool.get('description', 'Описание отсутствует')
+                    if len(description) > 150:
+                        description = description[:150] + '...'
+                    response += f"   📝 {description}\n"
+
+                    # Извлечение параметров из inputSchema
+                    schema = tool.get('inputSchema', {})
+                    if isinstance(schema, dict):
+                        properties = schema.get('properties', {})
+                        if properties:
+                            params = list(properties.keys())[:5]  # Первые 5 параметров
+                            params_str = ', '.join(params)
+                            if len(properties) > 5:
+                                params_str += f' (+{len(properties) - 5} еще)'
+                            response += f"   ⚙️ Параметры: {params_str}\n"
+
+                    response += "\n"
+
+            response += f"📊 <b>Всего инструментов: {len(all_tools)}</b>\n\n"
+            response += "💡 Используйте DeepSeek для автоматического вызова этих инструментов."
 
             # Проверка длины сообщения (Telegram ограничение)
             if len(response) > 4096:
@@ -1184,17 +1257,7 @@ class TelegramBot:
                 # Отправка ответа пользователю
                 await loading_message.edit_text(response, parse_mode="HTML")
 
-            logger.info(f"Отправлен список из {len(tools)} MCP инструментов пользователю {user_id}")
-
-        except ImportError as e:
-            logger.error(f"Ошибка импорта MCP библиотеки: {e}")
-            error_message = (
-                "❌ MCP библиотека не установлена\n\n"
-                "Для использования MCP функций необходимо установить библиотеку:\n"
-                "<code>pip install mcp</code>\n\n"
-                "После установки перезапустите бота."
-            )
-            await loading_message.edit_text(error_message, parse_mode="HTML")
+            logger.info(f"Отправлен список из {len(all_tools)} MCP инструментов пользователю {user_id}")
 
         except Exception as e:
             logger.error(f"Ошибка при получении списка MCP инструментов для пользователя {user_id}: {e}", exc_info=True)
@@ -1625,6 +1688,20 @@ class TelegramBot:
             except Exception as e:
                 logger.error(f"Ошибка при подключении к GitHub MCP серверу: {e}", exc_info=True)
 
+        # Подключение к Filesystem MCP для DeepSeek
+        if self.filesystem_mcp_client:
+            try:
+                logger.info("Подключение к Filesystem MCP серверу...")
+                connected = await self.filesystem_mcp_client.connect()
+                if connected:
+                    logger.info("✅ Filesystem MCP сервер успешно подключен для DeepSeek")
+                    tools = await self.filesystem_mcp_client.list_tools()
+                    logger.info(f"Доступно {len(tools)} Filesystem MCP tools: {[t['name'] for t in tools]}")
+                else:
+                    logger.warning("❌ Не удалось подключиться к Filesystem MCP серверу")
+            except Exception as e:
+                logger.error(f"Ошибка при подключении к Filesystem MCP серверу: {e}", exc_info=True)
+
         # Подключение к Telegram Assistant MCP для DeepSeek
         if self.telegram_assistant_mcp_client:
             try:
@@ -1678,6 +1755,15 @@ class TelegramBot:
                 logger.info("✅ GitHub MCP сервер отключен")
             except Exception as e:
                 logger.error(f"Ошибка при отключении от GitHub MCP сервера: {e}", exc_info=True)
+
+        # Отключение от Filesystem MCP
+        if self.filesystem_mcp_client and self.filesystem_mcp_client.is_connected():
+            try:
+                logger.info("Отключение от Filesystem MCP сервера...")
+                await self.filesystem_mcp_client.disconnect()
+                logger.info("✅ Filesystem MCP сервер отключен")
+            except Exception as e:
+                logger.error(f"Ошибка при отключении от Filesystem MCP сервера: {e}", exc_info=True)
 
         # Отключение от Telegram Assistant MCP
         if self.telegram_assistant_mcp_client and self.telegram_assistant_mcp_client.is_connected():

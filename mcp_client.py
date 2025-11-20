@@ -503,3 +503,30 @@ def get_telegram_assistant_mcp_config() -> Dict[str, Any]:
         "url": "http://localhost:8002/sse",
         "headers": {}
     }
+
+
+def get_filesystem_mcp_config() -> Dict[str, Any]:
+    """
+    Получение конфигурации для Filesystem MCP сервера.
+
+    Filesystem MCP сервер предоставляет инструменты для работы с файловой системой:
+    - list_directory: вывод содержимого директории
+    - change_directory: навигация по файловой системе
+    - read_file: чтение содержимого файла
+    - write_file: создание нового файла
+    - edit_file: редактирование существующего файла
+    - get_file_info: получение метаданных файла
+
+    Используется HTTP/SSE транспорт (аналогично GitHub MCP) для стабильности.
+
+    Для работы нужно запустить сервер отдельно:
+        python mcp_server/filesystem.py
+
+    Returns:
+        Словарь с конфигурацией для подключения к Filesystem MCP серверу
+    """
+    return {
+        "type": "http",
+        "url": "http://localhost:8003/sse",
+        "headers": {}
+    }

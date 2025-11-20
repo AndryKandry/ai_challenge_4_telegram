@@ -114,32 +114,44 @@ class DeepSeekProvider(LLMProvider):
             logger.debug(f"Количество сообщений в контексте: {len(messages)}")
             if tools:
                 logger.info(f"MCP Tools доступны: {len(tools)} инструментов")
+                tool_names = [t['function']['name'] for t in tools]
+                logger.info(f"Доступные инструменты: {', '.join(tool_names)}")
 
-            # Отправляем запрос к DeepSeek API
-            if tools:
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                    tools=tools,
-                    tool_choice="auto"  # Позволяем модели решать когда использовать tools
-                )
-            else:
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens
-                )
+            # Цикл обработки tool calls (максимум 5 итераций для предотвращения бесконечного цикла)
+            max_iterations = 5
+            iteration = 0
 
-            # Обработка ответа с возможными tool calls
-            if response.choices and len(response.choices) > 0:
+            while iteration < max_iterations:
+                iteration += 1
+
+                # Отправляем запрос к DeepSeek API
+                if tools:
+                    response = await self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                        tools=tools,
+                        tool_choice="auto"  # Позволяем модели решать когда использовать tools
+                    )
+                else:
+                    response = await self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens
+                    )
+
+                # Проверка ответа
+                if not response.choices or len(response.choices) == 0:
+                    logger.error("DeepSeek вернул пустой список choices")
+                    return None
+
                 message = response.choices[0].message
 
                 # Проверяем есть ли tool calls
                 if hasattr(message, 'tool_calls') and message.tool_calls:
-                    logger.info(f"DeepSeek запросил вызов {len(message.tool_calls)} инструментов")
+                    logger.info(f"DeepSeek запросил вызов {len(message.tool_calls)} инструментов (итерация {iteration})")
 
                     # Обрабатываем tool calls
                     tool_results = await self._handle_tool_calls(message.tool_calls)
@@ -169,31 +181,19 @@ class DeepSeekProvider(LLMProvider):
                             "content": result
                         })
 
-                    # Делаем второй запрос для получения финального ответа
-                    logger.info("Отправка второго запроса с результатами tool calls")
-                    final_response = await self.client.chat.completions.create(
-                        model=self.model,
-                        messages=messages,
-                        temperature=self.temperature,
-                        max_tokens=self.max_tokens
-                    )
+                    # Продолжаем цикл для следующей итерации
+                    logger.info(f"Продолжаем обработку с результатами tool calls (итерация {iteration})")
+                    continue
 
-                    if final_response.choices and len(final_response.choices) > 0:
-                        final_message = final_response.choices[0].message.content
-                        logger.info("Получен финальный ответ от DeepSeek после tool calls")
-                        return final_message
-                    else:
-                        logger.error("DeepSeek не вернул финальный ответ после tool calls")
-                        return None
-
-                # Обычный ответ без tool calls
+                # Если нет tool calls - это финальный ответ
                 assistant_message = message.content
-                logger.info("Получен ответ от DeepSeek API")
+                logger.info(f"Получен финальный ответ от DeepSeek API (после {iteration} итераций)")
                 logger.debug(f"Длина ответа: {len(assistant_message) if assistant_message else 0} символов")
                 return assistant_message
-            else:
-                logger.error("DeepSeek вернул пустой список choices")
-                return None
+
+            # Если достигли максимума итераций
+            logger.warning(f"Достигнуто максимальное количество итераций tool calls ({max_iterations})")
+            return "Извините, не удалось завершить обработку запроса - слишком много вызовов инструментов."
 
         except RateLimitError as e:
             logger.error(f"Превышен лимит запросов к DeepSeek API: {e}")

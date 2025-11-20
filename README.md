@@ -4,7 +4,14 @@ Telegram-бот с поддержкой нескольких LLM провайд�
 
 ## 🌟 Новое в этой версии
 
-- **GitHub Integration с DeepSeek (NEW!):**
+- **Filesystem Integration с DeepSeek (NEW!):**
+  - Интеграция файловой системы через MCP (Model Context Protocol)
+  - Полноценная работа с файлами: чтение, запись, редактирование, навигация
+  - 6 инструментов: list_directory, read_file, write_file, edit_file, change_directory, get_file_info
+  - Автоматическое создание резервных копий при редактировании
+  - Безопасность: валидация путей, защита системных директорий, ограничения размеров
+  - **Работает только с DeepSeek** - Yandex GPT и OpenAI не затронуты
+- **GitHub Integration с DeepSeek:**
   - Интеграция GitHub API через MCP (Model Context Protocol)
   - Автоматический вызов GitHub tools при использовании DeepSeek
   - Получение информации о пользователях, репозиториях и коммитах GitHub
@@ -40,6 +47,14 @@ Telegram-бот с поддержкой нескольких LLM провайд�
   - Рекомендации по выбору оптимальной температуры для задачи
 - **MCP (Model Context Protocol) интеграция:**
   - Подключение к внешним инструментам через унифицированный протокол
+  - **Filesystem MCP Server (только для DeepSeek):**
+    - `list_directory` - просмотр содержимого директории
+    - `change_directory` - навигация по файловой системе
+    - `read_file` - чтение содержимого файлов
+    - `write_file` - создание новых файлов
+    - `edit_file` - редактирование существующих файлов
+    - `get_file_info` - получение метаданных файлов
+    - Автоматическое создание пайплайнов (GitHub + Filesystem)
   - **GitHub MCP Server (только для DeepSeek):**
     - `get_user_info` - информация о пользователях GitHub
     - `get_user_repositories` - список репозиториев
@@ -87,13 +102,27 @@ DEEPSEEK_API_KEY=ваш_deepseek_api_key
 
 **Примечание:** Yandex GPT используется как fallback провайдер, поэтому его ключ обязателен. OpenAI используется по умолчанию для новых пользователей.
 
-### 3. Запустите бота
+### 3. (Опционально) Запустите MCP серверы для DeepSeek
+
+Если вы планируете использовать DeepSeek с MCP инструментами, запустите MCP серверы:
+
+```bash
+# Терминал 1: GitHub MCP Server (порт 8001)
+python mcp_server/github.py
+
+# Терминал 2: Filesystem MCP Server (порт 8003)
+python mcp_server/filesystem.py
+```
+
+**Примечание:** MCP серверы нужны только для DeepSeek. OpenAI и Yandex GPT работают без них.
+
+### 4. Запустите бота
 
 ```bash
 python bot.py
 ```
 
-### 4. Протестируйте в Telegram
+### 5. Протестируйте в Telegram
 
 ```
 # Основные команды
@@ -628,6 +657,38 @@ MCP (Model Context Protocol) - это открытый протокол от Ant
 ### Команды
 
 - `/mcp_tools` - получить список всех доступных MCP инструментов
+
+### Примеры использования с DeepSeek
+
+**Filesystem MCP:**
+```
+Пользователь: Прочитай файл ~/Documents/notes.txt
+Бот: [автоматически вызывает read_file и возвращает содержимое]
+
+Пользователь: Создай файл ~/todo.txt со списком: купить молоко, сделать презентацию
+Бот: [автоматически форматирует и вызывает write_file]
+
+Пользователь: Перейди в ~/Documents и покажи список файлов
+Бот: [вызывает change_directory и list_directory]
+```
+
+**GitHub + Filesystem (pipeline):**
+```
+Пользователь: Получи информацию о пользователе GitHub torvalds и сохрани в файл ~/torvalds.txt
+Бот: [автоматически:
+  1. Вызывает get_user_info (GitHub MCP)
+  2. Форматирует информацию
+  3. Вызывает write_file (Filesystem MCP)
+  4. Сообщает результат]
+```
+
+### Документация
+
+Подробная техническая документация доступна в директории `docs/`:
+- **[mcp_filesystem_server.md](docs/mcp_filesystem_server.md)** - Filesystem MCP Server: архитектура, инструменты, безопасность
+- **[mcp_integration_deepseek.md](docs/mcp_integration_deepseek.md)** - Интеграция MCP с DeepSeek: function calling, обработка tool calls
+- **[mcp_pipelines_examples.md](docs/mcp_pipelines_examples.md)** - Примеры автоматических пайплайнов
+- **[mcp_security.md](docs/mcp_security.md)** - Политики безопасности, валидация, best practices
 
 
 ## Возможные улучшения
