@@ -211,7 +211,7 @@ async def get_user_repositories(username: str) -> str:
     url = f"{GITHUB_API_BASE}/users/{username}/repos"
     params = {
         "sort": "updated",  # Сортировка по дате обновления
-        "per_page": 30      # Максимум 30 репозиториев
+        "per_page": 10      # Максимум 10 репозиториев (уменьшено для быстрой обработки)
     }
 
     data = await make_github_request(url, params)

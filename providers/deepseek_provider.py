@@ -34,7 +34,7 @@ class DeepSeekProvider(LLMProvider):
         self,
         api_key: str,
         model: str = "deepseek-chat",
-        timeout: int = 30,
+        timeout: int = 90,  # Увеличен до 90 секунд для MCP tool calls
         temperature: float = 0.9,
         max_tokens: int = 2000,
         mcp_client: Optional[Any] = None
@@ -117,8 +117,8 @@ class DeepSeekProvider(LLMProvider):
                 tool_names = [t['function']['name'] for t in tools]
                 logger.info(f"Доступные инструменты: {', '.join(tool_names)}")
 
-            # Цикл обработки tool calls (максимум 5 итераций для предотвращения бесконечного цикла)
-            max_iterations = 5
+            # Цикл обработки tool calls (максимум 10 итераций для предотвращения бесконечного цикла)
+            max_iterations = 10
             iteration = 0
 
             while iteration < max_iterations:

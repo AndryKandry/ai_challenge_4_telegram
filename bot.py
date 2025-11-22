@@ -23,10 +23,15 @@ from telegram.ext import (
 
 # Импорт модулей форматирования и промптов
 from format_manager import FormatManager
-from prompts import SYSTEM_PROMPT_DEFAULT, SYSTEM_PROMPT_JSON, SYSTEM_PROMPT_XML
+from prompts import (
+    SYSTEM_PROMPT_DEFAULT,
+    SYSTEM_PROMPT_JSON,
+    SYSTEM_PROMPT_XML,
+    SYSTEM_PROMPT_DEEPSEEK_WITH_TOOLS
+)
 from temperature_tester import TemperatureTester
 from database import MemoryManager
-from mcp_client import MCPClient, get_weather_mcp_config, get_github_mcp_config, get_telegram_assistant_mcp_config, get_filesystem_mcp_config
+from mcp_client import MCPClient, get_github_mcp_config, get_telegram_assistant_mcp_config, get_filesystem_mcp_config
 
 # Импорт провайдеров LLM и хранилища настроек
 from providers import OpenAIProvider, YandexGPTProvider, DeepSeekProvider
@@ -720,8 +725,16 @@ class TelegramBot:
         mode = self.user_modes.get(user_id, DEFAULT_MODE)
         logger.info(f"Режим вывода для пользователя {user_id}: {mode}")
 
-        # Выбор системного промпта в зависимости от режима
-        if mode == "json":
+        # Получаем выбранный провайдер для пользователя
+        selected_provider = self.user_settings.get_provider(user_id)
+        logger.info(f"Выбранный провайдер для пользователя {user_id}: {selected_provider}")
+
+        # Выбор системного промпта в зависимости от режима И провайдера
+        # Для DeepSeek с MCP tools используем специальный промпт
+        if selected_provider == "deepseek" and (self.github_mcp_client or self.filesystem_mcp_client):
+            system_prompt = SYSTEM_PROMPT_DEEPSEEK_WITH_TOOLS
+            logger.info(f"Используется специальный промпт для DeepSeek с MCP tools")
+        elif mode == "json":
             system_prompt = SYSTEM_PROMPT_JSON
         elif mode == "xml":
             system_prompt = SYSTEM_PROMPT_XML
@@ -730,10 +743,6 @@ class TelegramBot:
 
         # Отправка индикатора набора текста
         await update.message.chat.send_action("typing")
-
-        # Получаем выбранный провайдер для пользователя
-        selected_provider = self.user_settings.get_provider(user_id)
-        logger.info(f"Выбранный провайдер для пользователя {user_id}: {selected_provider}")
 
         # Выбор провайдера и отправка запроса
         if selected_provider == "openai" and self.openai_provider:
