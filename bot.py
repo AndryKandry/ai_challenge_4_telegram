@@ -32,6 +32,9 @@ from mcp_client import MCPClient, get_weather_mcp_config
 from providers import OpenAIProvider, YandexGPTProvider, DeepSeekProvider
 from storage import UserSettings
 
+# Импорт RAG модуля
+from src.rag_integration import RAGManager
+
 # Настройка логирования
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -200,10 +203,22 @@ class TelegramBot:
         else:
             logger.warning("OPENAI_API_KEY не задан, OpenAI провайдер недоступен")
 
+        # Инициализация RAG Manager
+        try:
+            self.rag_manager = RAGManager()
+            logger.info("RAG Manager инициализирован")
+        except Exception as e:
+            logger.warning(f"RAG Manager не инициализирован: {e}")
+            self.rag_manager = None
+
         self.deepseek_provider = None
         if deepseek_api_key:
-            self.deepseek_provider = DeepSeekProvider(deepseek_api_key)
-            logger.info("DeepSeek Provider инициализирован")
+            # Передаём RAG Manager в DeepSeek провайдер
+            self.deepseek_provider = DeepSeekProvider(
+                deepseek_api_key,
+                rag_manager=self.rag_manager
+            )
+            logger.info("DeepSeek Provider инициализирован с RAG")
         else:
             logger.warning("DEEPSEEK_API_KEY не задан, DeepSeek провайдер недоступен")
 
@@ -596,10 +611,19 @@ class TelegramBot:
         logger.info(f"Выбранный провайдер для пользователя {user_id}: {selected_provider}")
 
         # Выбор провайдера и отправка запроса
+        rag_sources = []  # Список источников RAG
+
         if selected_provider == "openai" and self.openai_provider:
             provider = self.openai_provider
+            response = await provider.generate_response(
+                user_message, system_prompt, conversation_history
+            )
         elif selected_provider == "deepseek" and self.deepseek_provider:
             provider = self.deepseek_provider
+            # Для DeepSeek используем метод с источниками RAG
+            response, rag_sources = await provider.generate_response_with_sources(
+                user_message, system_prompt, conversation_history
+            )
         else:
             # Fallback на Yandex если выбранный провайдер недоступен
             if selected_provider == "openai" and not self.openai_provider:
@@ -616,11 +640,9 @@ class TelegramBot:
                 self.user_settings.set_provider(user_id, "yandex")
 
             provider = self.yandex_provider
-
-        # Отправка запроса к выбранному провайдеру
-        response = await provider.generate_response(
-            user_message, system_prompt, conversation_history
-        )
+            response = await provider.generate_response(
+                user_message, system_prompt, conversation_history
+            )
 
         # Логирование действия агента
         execution_time = int((time.time() - start_time) * 1000)
@@ -672,6 +694,13 @@ class TelegramBot:
         try:
             if mode == "text":
                 formatted_response = self.format_manager.format_text_response(response)
+
+                # Добавляем информацию об источниках RAG только в текстовом режиме
+                # и только если используется DeepSeek
+                if rag_sources and selected_provider == "deepseek":
+                    sources_info = self.rag_manager.format_sources_info(rag_sources)
+                    formatted_response += sources_info
+
             elif mode == "json":
                 formatted_response = self.format_manager.format_json_output(response)
             elif mode == "xml":

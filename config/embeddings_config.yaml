@@ -1,0 +1,109 @@
+# Настройки Ollama
+ollama:
+  url: "http://localhost:11434"
+  model: "nomic-embed-text"  # или mxbai-embed-large
+  timeout: 30
+  max_retries: 3
+  retry_delay: 1.0  # секунды
+  request_delay: 0.5  # задержка между запросами для предотвращения перегрузки (секунды)
+
+# Параметры разбивки на чанки
+chunking:
+  chunk_size: 800           # токены
+  overlap: 150              # токены
+  min_chunk_size: 100       # токены
+  max_chunk_size: 2000      # токены
+
+  # Настройки для markdown
+  markdown:
+    preserve_headers: true   # Сохранять заголовки в метаданных
+    split_by_headers: true   # Разбивать по заголовкам
+
+# Настройки индексации
+indexing:
+  # Основная директория с документами для индексации
+  default_docs_dir: "rag_docs"
+
+  index_path: "data/embeddings/document_index.json"
+  backup_index: true
+  backup_dir: "data/embeddings/backups"
+
+  # Паттерны исключения
+  exclude_patterns:
+    - "__pycache__"
+    - ".git"
+    - "node_modules"
+    - "venv"
+    - ".env"
+    - "*.pyc"
+    - ".DS_Store"
+    - ".gitkeep"
+
+  # Поддерживаемые расширения
+  include_extensions:
+    - ".md"
+    - ".txt"
+
+  # Максимальный размер файла (в байтах)
+  max_file_size: 10485760  # 10 MB
+
+  # БУДУЩАЯ ФУНКЦИОНАЛЬНОСТЬ: настройки для пользовательских документов
+  user_documents:
+    enabled: false  # TODO: включить когда будет реализовано
+    storage_dir: "data/user_documents"
+    max_documents_per_user: 50
+    max_total_size_per_user: 52428800  # 50 MB
+    allowed_sources:
+      - "telegram_upload"
+      - "external_path"
+      - "cloud_sync"
+
+# Настройки поиска
+search:
+  top_k: 5
+  min_similarity: 0.5
+  cache_queries: true
+  cache_ttl: 3600  # секунды
+
+  # БУДУЩАЯ ФУНКЦИОНАЛЬНОСТЬ: поиск по пользовательским документам
+  user_documents_search:
+    enabled: false  # TODO: включить когда будет реализовано
+    isolate_by_user: true  # Изолировать поиск по документам пользователя
+    include_global_docs: true  # Включать общие документы из rag_docs
+
+# Настройки интеграции с DeepSeek
+deepseek_integration:
+  context_chunks: 3
+  max_context_tokens: 2000
+  context_template: |
+    Контекст из документации:
+    ---
+    {context}
+    ---
+
+    Вопрос пользователя: {query}
+
+  # Ключевые слова для автоматического использования RAG
+  rag_keywords:
+    - "документация"
+    - "как работает"
+    - "инструкция"
+    - "руководство"
+    - "что такое"
+    - "объясни"
+    - "покажи пример"
+    - "как использовать"
+    - "расскажи про"
+    - "как настроить"
+    - "как запустить"
+    - "команды"
+    - "api"
+    - "установка"
+
+# Настройки логирования
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  file: "logs/embeddings.log"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  max_size: 10485760  # 10 MB
+  backup_count: 5
