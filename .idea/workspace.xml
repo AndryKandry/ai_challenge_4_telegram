@@ -4,30 +4,22 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="3ba4d2c7-911d-41b9-be2c-9ed75c50d93b" name="Changes" comment="День 15. Индексация документов">
-      <change afterPath="$PROJECT_DIR$/data/backups/index_backup_20251125_134652.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/backups/index_backup_20251125_140729.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/backups/index_backup_20251125_144312.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rag_docs/sumrak/АРАБСКАЯ ИМПЕРИЯ.txt" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rag_docs/sumrak/БОЛИВАРСКАЯ КОММУНА.txt" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rag_docs/sumrak/Битва за Краков.txt" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rag_docs/sumrak/ВЕЛЛИНГТОНСКОЕ СОДРУЖЕСТВО.txt" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rag_docs/sumrak/Книга игрока Сумрак 2096.md" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rag_docs/sumrak/СОЛНЕЧНАЯ УНИЯ.txt" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rag_docs/sumrak/СОЮЗ ВЕЛИКОГО ОРЛА.txt" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rag_docs/sumrak/ТЕХНОФЕДЕРАЦИЯ ЧЖОУ.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.claude/settings.local.json" beforeDir="false" afterPath="$PROJECT_DIR$/.claude/settings.local.json" afterDir="false" />
+    <list default="true" id="3ba4d2c7-911d-41b9-be2c-9ed75c50d93b" name="Changes" comment="Добавлены документы по НРИ Сумрак 2096">
+      <change afterPath="$PROJECT_DIR$/rag_docs/documentation/README_1.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/RAG_IMPLEMENTATION_SUMMARY.md" beforeDir="false" afterPath="$PROJECT_DIR$/RAG_IMPLEMENTATION_SUMMARY.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/RAG_SETUP.md" beforeDir="false" afterPath="$PROJECT_DIR$/RAG_SETUP.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/RAG_USAGE.md" beforeDir="false" afterPath="$PROJECT_DIR$/RAG_USAGE.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/agent_memory.db" beforeDir="false" afterPath="$PROJECT_DIR$/agent_memory.db" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/bot.py" beforeDir="false" afterPath="$PROJECT_DIR$/bot.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/config/embeddings_config.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/config/embeddings_config.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/data/embeddings/document_index.json" beforeDir="false" afterPath="$PROJECT_DIR$/data/embeddings/document_index.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/docs/rag_implementation.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/rag_implementation.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/docs/rag_quickstart.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/rag_quickstart.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/embeddings/embedder.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/embeddings/embedder.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/rag_docs/sumrak/АРАБСКАЯ ИМПЕРИЯ.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/rag_docs/sumrak/БОЛИВАРСКАЯ КОММУНА.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/rag_docs/sumrak/Битва за Краков.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/rag_docs/sumrak/ВЕЛЛИНГТОНСКОЕ СОДРУЖЕСТВО.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/rag_docs/sumrak/Книга игрока Сумрак 2096.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/rag_docs/sumrak/СОЛНЕЧНАЯ УНИЯ.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/rag_docs/sumrak/СОЮЗ ВЕЛИКОГО ОРЛА.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/rag_docs/sumrak/ТЕХНОФЕДЕРАЦИЯ ЧЖОУ.txt" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -44,23 +36,23 @@
   <component name="Git.Settings">
     <option name="RECENT_BRANCH_BY_REPOSITORY">
       <map>
-        <entry key="$PROJECT_DIR$" value="develop" />
+        <entry key="$PROJECT_DIR$" value="rag" />
       </map>
     </option>
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
-  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
-  "lastFilter": {
-    "state": "OPEN",
-    "assignee": "AndryKandry"
+  <component name="GitHubPullRequestSearchHistory">{
+  &quot;lastFilter&quot;: {
+    &quot;state&quot;: &quot;OPEN&quot;,
+    &quot;assignee&quot;: &quot;AndryKandry&quot;
   }
-}]]></component>
-  <component name="GithubPullRequestsUISettings"><![CDATA[{
-  "selectedUrlAndAccountId": {
-    "url": "https://github.com/AndryKandry/ai_challenge_4_telegram.git",
-    "accountId": "4fbc38e3-17cf-448d-b82a-a77df8a43bf0"
+}</component>
+  <component name="GithubPullRequestsUISettings">{
+  &quot;selectedUrlAndAccountId&quot;: {
+    &quot;url&quot;: &quot;https://github.com/AndryKandry/ai_challenge_4_telegram.git&quot;,
+    &quot;accountId&quot;: &quot;4fbc38e3-17cf-448d-b82a-a77df8a43bf0&quot;
   }
-}]]></component>
+}</component>
   <component name="ProjectColorInfo">{
   &quot;associatedIndex&quot;: 1
 }</component>
@@ -69,22 +61,23 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
-    &quot;Python.bot.executor&quot;: &quot;Run&quot;,
-    &quot;Python.filesystem.executor&quot;: &quot;Run&quot;,
-    &quot;Python.github.executor&quot;: &quot;Run&quot;,
-    &quot;Python.python manage_index.py index.executor&quot;: &quot;Run&quot;,
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;rag&quot;,
-    &quot;last_opened_file_path&quot;: &quot;/Users/andreykozyrev/PycharmProjects/ai_challenge_4_telegram/rag_docs/sumrak&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "Python.bot.executor": "Run",
+    "Python.filesystem.executor": "Run",
+    "Python.github.executor": "Run",
+    "Python.python manage_index.py index.executor": "Run",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "git-widget-placeholder": "rag__check",
+    "last_opened_file_path": "/Users/andreykozyrev/PycharmProjects/ai_challenge_4_telegram/rag_docs/documentation"
   }
-}</component>
+}]]></component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/rag_docs/documentation" />
       <recent name="$PROJECT_DIR$/rag_docs/sumrak" />
       <recent name="$PROJECT_DIR$/rag_docs" />
     </key>
@@ -245,7 +238,15 @@
       <option name="project" value="LOCAL" />
       <updated>1764050453258</updated>
     </task>
-    <option name="localTasksCounter" value="3" />
+    <task id="LOCAL-00003" summary="Добавлены документы по НРИ Сумрак 2096">
+      <option name="closed" value="true" />
+      <created>1764069251308</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1764069251308</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -262,6 +263,7 @@
   <component name="VcsManagerConfiguration">
     <MESSAGE value="Init commit" />
     <MESSAGE value="День 15. Индексация документов" />
-    <option name="LAST_COMMIT_MESSAGE" value="День 15. Индексация документов" />
+    <MESSAGE value="Добавлены документы по НРИ Сумрак 2096" />
+    <option name="LAST_COMMIT_MESSAGE" value="Добавлены документы по НРИ Сумрак 2096" />
   </component>
 </project>

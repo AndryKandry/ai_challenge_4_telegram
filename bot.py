@@ -35,6 +35,10 @@ from storage import UserSettings
 # Импорт RAG модуля
 from src.rag_integration import RAGManager
 
+# Импорт модулей сравнения RAG
+from utils.state_manager import RAGStateManager
+from rag.comparison import RAGComparator
+
 # Настройка логирования
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -252,6 +256,16 @@ class TelegramBot:
         self.memory.create_tables()
         logger.info("Система памяти инициализирована")
 
+        # Инициализация компонентов сравнения RAG
+        self.rag_state_manager = RAGStateManager()
+        self.rag_comparator = None
+        if self.deepseek_provider and self.rag_manager:
+            self.rag_comparator = RAGComparator(self.deepseek_provider)
+            logger.info("RAG Comparator инициализирован")
+        else:
+            logger.warning("RAG Comparator недоступен (требуется DeepSeek Provider с RAG)")
+
+
         # Регистрация обработчиков команд
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
@@ -279,6 +293,9 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("yandex", self.yandex_command))
         self.application.add_handler(CommandHandler("deepseek", self.deepseek_command))
         self.application.add_handler(CommandHandler("model", self.model_command))
+
+        # Команда сравнения RAG
+        self.application.add_handler(CommandHandler("rag", self.rag_command))
 
         # Обработчик ошибок
         self.application.add_error_handler(self.error_handler)
@@ -312,6 +329,8 @@ class TelegramBot:
             "/end_session - Завершить текущую сессию\n\n"
             "🧪 Тестирование:\n"
             "/test_temperature - Сравнить работу LLM при разных температурах\n\n"
+            "🔬 Сравнение RAG (только DeepSeek):\n"
+            "/rag - Режим сравнения ответов с RAG и без RAG\n\n"
             "🛠 MCP Инструменты (Погода):\n"
             "/mcp_tools - Показать доступные инструменты для погоды\n\n"
             "❓ Используй /help для полной справки."
@@ -360,6 +379,17 @@ class TelegramBot:
             "• 0.0 = детерминированность (точные ответы)\n"
             "• 0.7 = баланс (универсальный режим)\n"
             "• 1.0 = креативность (оригинальные идеи)\n\n"
+            "🔬 Сравнение RAG (только для DeepSeek):\n"
+            "/rag - Включить/выключить режим сравнения RAG\n\n"
+            "В этом режиме бот генерирует ДВА ответа на каждый вопрос:\n"
+            "• Один без использования документов (только знания модели)\n"
+            "• Один с использованием RAG (с контекстом из документов)\n\n"
+            "Вы увидите:\n"
+            "• Оба ответа полностью\n"
+            "• Метрики (токены, время генерации, релевантность документов)\n"
+            "• Автоматический анализ - где RAG помог, а где нет\n\n"
+            "⚠️ Режим доступен ТОЛЬКО при использовании модели DeepSeek.\n"
+            "Генерация двух ответов занимает в 2 раза больше времени.\n\n"
             "🛠 MCP (Model Context Protocol):\n"
             "/mcp_tools - Получить список доступных MCP инструментов\n\n"
             "MCP позволяет боту подключаться к внешним инструментам.\n"
@@ -610,7 +640,85 @@ class TelegramBot:
         selected_provider = self.user_settings.get_provider(user_id)
         logger.info(f"Выбранный провайдер для пользователя {user_id}: {selected_provider}")
 
-        # Выбор провайдера и отправка запроса
+        # ПРОВЕРКА: Режим сравнения RAG
+        if (selected_provider == "deepseek" and
+            self.rag_state_manager.is_comparison_mode(user_id) and
+            self.rag_comparator):
+
+            logger.info(f"Пользователь {user_id} в режиме сравнения RAG")
+
+            # Отправляем уведомление о начале генерации
+            comparison_notice = await update.message.reply_text(
+                "⏳ Генерирую два ответа для сравнения...\n"
+                "Это займет немного больше времени."
+            )
+
+            try:
+                # Генерируем сравнение
+                comparison_result = await self.rag_comparator.compare_responses(
+                    user_message, system_prompt, conversation_history
+                )
+
+                # Записываем статистику сравнения
+                analysis_helpful = comparison_result.analysis.get('rag_helpful', None)
+                self.rag_state_manager.record_comparison(user_id, analysis_helpful)
+
+                # Сохраняем ответ в БД (сохраняем ответ С RAG как основной)
+                try:
+                    self.memory.save_message(
+                        user_id, chat_id,
+                        comparison_result.with_rag_response,
+                        "assistant", session_id
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка сохранения ответа в БД: {e}")
+
+                # Удаляем уведомление
+                await comparison_notice.delete()
+
+                # Отправляем результат сравнения
+                # Разбиваем на части если слишком длинный
+                max_length = 4096
+                formatted_output = comparison_result.formatted_output
+
+                if len(formatted_output) <= max_length:
+                    await update.message.reply_text(
+                        formatted_output,
+                        parse_mode="Markdown"
+                    )
+                else:
+                    # Разбиваем на части
+                    parts = self._split_long_message(formatted_output, max_length)
+                    for part in parts:
+                        await update.message.reply_text(part, parse_mode="Markdown")
+                        await asyncio.sleep(0.5)
+
+                logger.info(f"Сравнение RAG отправлено пользователю {user_id}")
+                return  # Выходим из обработчика
+
+            except Exception as e:
+                logger.error(
+                    f"Ошибка при сравнении RAG для пользователя {user_id}: {e}",
+                    exc_info=True
+                )
+
+                # Удаляем уведомление
+                try:
+                    await comparison_notice.delete()
+                except:
+                    pass
+
+                # Отправляем сообщение об ошибке
+                error_message = (
+                    "❌ Ошибка при сравнении режимов RAG\n\n"
+                    "Не удалось выполнить сравнение. "
+                    "Возвращаюсь к обычному режиму для этого сообщения."
+                )
+                await update.message.reply_text(error_message)
+
+                # Продолжаем с обычной обработкой (fallthrough)
+
+        # Выбор провайдера и отправка запроса (обычный режим)
         rag_sources = []  # Список источников RAG
 
         if selected_provider == "openai" and self.openai_provider:
@@ -1269,6 +1377,83 @@ class TelegramBot:
         await update.message.reply_text(message)
         logger.info(f"Пользователь {user_id} проверил текущую модель: {provider}")
 
+    async def rag_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /rag - переключение режима сравнения RAG."""
+        user_id = update.effective_user.id
+        current_provider = self.user_settings.get_provider(user_id)
+
+        # Проверяем, доступен ли режим сравнения RAG
+        if current_provider != "deepseek":
+            error_message = (
+                "❌ Режим сравнения RAG доступен только для модели DeepSeek\n\n"
+                "Для использования этой функции:\n"
+                "1. Переключитесь на DeepSeek командой /deepseek\n"
+                "2. Затем включите режим сравнения командой /rag\n\n"
+                "Текущая модель: " + current_provider.upper()
+            )
+            await update.message.reply_text(error_message)
+            logger.warning(
+                f"Пользователь {user_id} попытался включить режим RAG, "
+                f"но использует {current_provider}"
+            )
+            return
+
+        if not self.rag_comparator:
+            error_message = (
+                "❌ Режим сравнения RAG недоступен\n\n"
+                "Система сравнения RAG не была инициализирована.\n"
+                "Убедитесь что:\n"
+                "• DeepSeek Provider доступен\n"
+                "• RAG Manager инициализирован\n"
+                "• Ollama запущен для эмбеддингов"
+            )
+            await update.message.reply_text(error_message)
+            logger.error(
+                f"RAG Comparator недоступен для пользователя {user_id}"
+            )
+            return
+
+        # Переключаем режим
+        new_state = self.rag_state_manager.toggle_comparison_mode(user_id)
+
+        if new_state:
+            # Режим включен
+            message = (
+                "✅ Режим сравнения RAG ВКЛЮЧЕН\n\n"
+                "Теперь на каждый ваш вопрос я буду генерировать ДВА ответа:\n"
+                "1️⃣ Без использования RAG (только знания модели)\n"
+                "2️⃣ С использованием RAG (с контекстом из документов)\n\n"
+                "Вы увидите:\n"
+                "• Оба ответа\n"
+                "• Сравнение метрик (токены, время)\n"
+                "• Анализ эффективности RAG\n\n"
+                "⚠️ Внимание: генерация двух ответов займет в 2 раза больше времени!\n\n"
+                "Для выключения режима используйте /rag снова"
+            )
+            logger.info(f"Пользователь {user_id} включил режим сравнения RAG")
+        else:
+            # Режим выключен
+            stats = self.rag_state_manager.get_statistics(user_id)
+
+            message = (
+                "🔴 Режим сравнения RAG ВЫКЛЮЧЕН\n\n"
+                "Возвращаюсь к обычному режиму работы.\n\n"
+            )
+
+            # Добавляем статистику если есть сравнения
+            if stats['total_comparisons'] > 0:
+                helpful_percent = stats['rag_helpful_percentage']
+                message += (
+                    f"📊 Статистика сравнений:\n"
+                    f"• Всего сравнений: {stats['total_comparisons']}\n"
+                    f"• RAG был полезен: {stats['rag_helpful']} раз ({helpful_percent:.1f}%)\n"
+                    f"• RAG не помог: {stats['rag_not_helpful']} раз\n"
+                )
+
+            logger.info(f"Пользователь {user_id} выключил режим сравнения RAG")
+
+        await update.message.reply_text(message)
+
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         Обработчик ошибок для логирования и уведомления пользователя.
@@ -1303,15 +1488,32 @@ class TelegramBot:
                 # Если не удалось отправить сообщение об ошибке, просто логируем
                 logger.error(f"Не удалось отправить сообщение об ошибке: {e}")
 
+    async def _run_async(self) -> None:
+        """Асинхронный запуск бота."""
+        async with self.application:
+            await self.application.initialize()
+            await self.application.start()
+            await self.application.updater.start_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True
+            )
+            logger.info("Бот успешно запущен и готов к работе!")
+            
+            # Создаем событие для ожидания прерывания
+            stop_event = asyncio.Event()
+            try:
+                await stop_event.wait()  # Ждем прерывания
+            except (KeyboardInterrupt, SystemExit):
+                logger.info("Получен сигнал остановки бота")
+            finally:
+                await self.application.updater.stop()
+                await self.application.stop()
+                logger.info("Бот корректно остановлен")
+
     def run(self) -> None:
         """Запуск бота."""
         logger.info("Запуск Telegram бота...")
-        # В версии 22+ run_polling() автоматически инициализирует и останавливает приложение
-        # Добавляем параметры для более корректной обработки ошибок
-        self.application.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True  # Игнорируем старые обновления при запуске
-        )
+        asyncio.run(self._run_async())
 
 
 def validate_environment() -> tuple[str, str, Optional[str], Optional[str]]:
