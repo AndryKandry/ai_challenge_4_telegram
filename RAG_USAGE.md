@@ -166,7 +166,7 @@ python test_rag_integration.py
 
 1. **RAG работает только с DeepSeek** - не поддерживается для OpenAI и Yandex GPT
 2. **Только текстовый режим** - в JSON/XML режимах источники не отображаются
-3. **Требуется Ollama** - для генерации эмбеддингов должен быть запущен Ollama с моделью `nomic-embed-text`
+3. **Требуется Ollama** - для генерации эмбеддингов должен быть запущен Ollama с моделью `bge-m3`
 4. **Триггеры на русском** - ключевые слова должны быть на русском языке
 
 ## Отладка
@@ -199,7 +199,7 @@ INFO - Message enriched with 3 RAG sources
 ollama serve
 
 # В другом терминале загрузите модель
-ollama pull nomic-embed-text
+ollama pull bge-m3
 ```
 
 **Проблема**: Источники не отображаются

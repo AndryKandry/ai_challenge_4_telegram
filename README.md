@@ -6,7 +6,7 @@ Telegram-бот с поддержкой нескольких LLM провайд�
 
 - **RAG (Retrieval Augmented Generation) ⚡ NEW!:**
   - 🔍 **Семантический поиск по документам** с использованием эмбеддингов
-  - Локальная генерация эмбеддингов через Ollama (nomic-embed-text)
+  - Локальная генерация эмбеддингов через Ollama (bge-m3)
   - Автоматическое использование контекста из документов в DeepSeek
   - CLI для управления индексом: `manage_index.py`
   - Поддержка markdown (.md) и текстовых (.txt) файлов
@@ -609,7 +609,7 @@ brew install ollama
 curl -fsSL https://ollama.com/install.sh | sh
 
 # Загрузите модель эмбеддингов
-ollama pull nomic-embed-text
+ollama pull bge-m3
 
 # Запустите сервер
 ollama serve

@@ -166,7 +166,7 @@
 ```bash
 # 1. Установка Ollama
 brew install ollama
-ollama pull nomic-embed-text
+ollama pull bge-m3
 ollama serve
 
 # 2. Установка зависимостей
@@ -241,7 +241,7 @@ if result['used_rag']:
 ## 🎓 Технологии
 
 - **Ollama** - локальная генерация эмбеддингов
-- **nomic-embed-text** - модель эмбеддингов (768D)
+- **bge-m3** - модель эмбеддингов (768D)
 - **NumPy** - векторные операции
 - **tiktoken** - подсчёт токенов
 - **Click** - CLI framework

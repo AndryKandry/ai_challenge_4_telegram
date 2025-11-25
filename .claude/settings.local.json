@@ -7,7 +7,12 @@
       "Bash(for file in bot.py format_manager.py prompts.py test_format_manager.py)",
       "Bash(do echo -n \"Проверка $file... \")",
       "Bash(done)",
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(chmod:*)",
+      "Bash(pip install:*)",
+      "Bash(python manage_index.py:*)",
+      "Bash(curl:*)",
+      "Bash(python test_rag_integration.py:*)"
     ],
     "deny": [],
     "ask": []

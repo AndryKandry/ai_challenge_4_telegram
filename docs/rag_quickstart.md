@@ -28,7 +28,7 @@ curl -fsSL https://ollama.com/install.sh | sh
 
 ```bash
 # Загрузите модель для эмбеддингов
-ollama pull nomic-embed-text
+ollama pull bge-m3
 
 # Запустите сервер
 ollama serve
@@ -93,7 +93,7 @@ python manage_index.py verify
 Ожидаемый вывод:
 ```
 ✓ Ollama доступен
-✓ Модель nomic-embed-text найдена
+✓ Модель bge-m3 найдена
 ```
 
 ### Запуск индексации
@@ -141,7 +141,7 @@ python manage_index.py stats
 ┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━┩
 │ Всего документов    │ 15                 │
 │ Всего чанков        │ 247                │
-│ Модель эмбеддингов  │ nomic-embed-text   │
+│ Модель эмбеддингов  │ bge-m3   │
 │ Размерность векторов│ 768                │
 └─────────────────────┴────────────────────┘
 ```
@@ -246,19 +246,19 @@ ollama serve
 ollama list
 
 # Если модель не установлена
-ollama pull nomic-embed-text
+ollama pull bge-m3
 ```
 
 ### Модель не найдена
 
 **Проблема:**
 ```
-⚠ Модель nomic-embed-text не найдена
+⚠ Модель bge-m3 не найдена
 ```
 
 **Решение:**
 ```bash
-ollama pull nomic-embed-text
+ollama pull bge-m3
 ```
 
 ### Пустой индекс
@@ -332,7 +332,7 @@ python manage_index.py search "query" --min-similarity 0.7
 
 - [Полная документация RAG](./rag_implementation.md)
 - [Ollama Documentation](https://ollama.com/docs)
-- [nomic-embed-text на Ollama](https://ollama.com/library/nomic-embed-text)
+- [bge-m3 на Ollama](https://ollama.com/library/bge-m3)
 
 ## Поддержка
 

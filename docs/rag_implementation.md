@@ -33,7 +33,7 @@
 
 2. **OllamaEmbedder** (`src/embeddings/embedder.py`)
    - Генерирует эмбеддинги через локальный Ollama
-   - Использует модель `nomic-embed-text` (768-мерные векторы)
+   - Использует модель `bge-m3` (768-мерные векторы)
    - Батчевая обработка и retry-логика
 
 3. **DocumentIndexer** (`src/embeddings/indexer.py`)
@@ -63,7 +63,7 @@ brew install ollama
 curl -fsSL https://ollama.com/install.sh | sh
 
 # Загрузка модели эмбеддингов
-ollama pull nomic-embed-text
+ollama pull bge-m3
 
 # Запуск сервера
 ollama serve
@@ -119,7 +119,7 @@ from src.embeddings.indexer import DocumentIndexer
 
 # Создание компонентов
 chunker = TextChunker(chunk_size=800, overlap=150)
-embedder = OllamaEmbedder(model="nomic-embed-text")
+embedder = OllamaEmbedder(model="bge-m3")
 indexer = DocumentIndexer(
     chunker=chunker,
     embedder=embedder,
@@ -242,7 +242,7 @@ python manage_index.py stats
 ┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━┩
 │ Всего документов    │ 15                 │
 │ Всего чанков        │ 247                │
-│ Модель эмбеддингов  │ nomic-embed-text   │
+│ Модель эмбеддингов  │ bge-m3   │
 │ Размерность векторов│ 768                │
 │ Создан              │ 2025-11-25T00:30:00│
 │ Обновлён            │ 2025-11-25T01:15:00│
@@ -269,7 +269,7 @@ python manage_index.py clear
 # Настройки Ollama
 ollama:
   url: "http://localhost:11434"
-  model: "nomic-embed-text"
+  model: "bge-m3"
   timeout: 30
 
 # Параметры чанкинга
@@ -324,7 +324,7 @@ deepseek_integration:
 Инструкция по запуску:
 1. Установите Ollama: https://ollama.com/download
 2. Запустите сервер: ollama serve
-3. Загрузите модель: ollama pull nomic-embed-text
+3. Загрузите модель: ollama pull bge-m3
 ```
 
 **Решение:**
@@ -340,7 +340,7 @@ ollama serve
 
 ```bash
 # Загрузите модель
-ollama pull nomic-embed-text
+ollama pull bge-m3
 
 # Проверьте доступные модели
 ollama list
@@ -387,7 +387,7 @@ ollama:
 ```
 
 Доступные модели:
-- `nomic-embed-text` - 768 измерений, быстрая
+- `bge-m3` - 768 измерений, быстрая
 - `mxbai-embed-large` - 1024 измерения, более точная
 - `all-minilm` - 384 измерения, самая быстрая
 
@@ -416,6 +416,6 @@ ollama:
 ## Ссылки
 
 - [Ollama Documentation](https://ollama.com/docs)
-- [nomic-embed-text Model](https://ollama.com/library/nomic-embed-text)
+- [bge-m3 Model](https://ollama.com/library/bge-m3)
 - [Embeddings Guide](./embeddings_guide.md)
 - [API Reference](./api_reference.md)

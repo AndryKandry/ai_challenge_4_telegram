@@ -38,7 +38,7 @@ brew install ollama
 curl -fsSL https://ollama.com/install.sh | sh
 
 # Загрузите модель эмбеддингов
-ollama pull nomic-embed-text
+ollama pull bge-m3
 
 # Запустите сервер
 ollama serve
@@ -59,7 +59,7 @@ python manage_index.py verify
 Должно вывести:
 ```
 ✓ Ollama доступен
-✓ Модель nomic-embed-text найдена
+✓ Модель bge-m3 найдена
 ```
 
 ### 4. Индексируйте документы
@@ -187,7 +187,7 @@ if result['used_rag']:
 # Ollama
 ollama:
   url: "http://localhost:11434"
-  model: "nomic-embed-text"    # или mxbai-embed-large
+  model: "bge-m3"    # или mxbai-embed-large
 
 # Размер чанков
 chunking:
@@ -311,7 +311,7 @@ ollama list
 ### Модель не найдена
 
 ```bash
-ollama pull nomic-embed-text
+ollama pull bge-m3
 ```
 
 ### Пустой индекс
@@ -350,7 +350,7 @@ ollama pull nomic-embed-text
 ## 🔗 Полезные ссылки
 
 - [Ollama](https://ollama.com)
-- [nomic-embed-text](https://ollama.com/library/nomic-embed-text)
+- [bge-m3](https://ollama.com/library/bge-m3)
 - [DeepSeek](https://deepseek.com)
 
 ---

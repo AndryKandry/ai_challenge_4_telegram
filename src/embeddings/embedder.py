@@ -21,7 +21,7 @@ class OllamaEmbedder:
 
     def __init__(
         self,
-        model: str = "nomic-embed-text",
+        model: str = "bge-m3",
         url: str = "http://localhost:11434",
         timeout: int = 30,
         max_retries: int = 3,
