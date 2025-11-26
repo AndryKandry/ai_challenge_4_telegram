@@ -292,3 +292,119 @@ class RAGManager:
         """Отключает RAG."""
         self.enabled = False
         logger.info("RAG disabled")
+
+    def rerank_documents(
+        self,
+        query: str,
+        documents: List[Dict],
+        method: str = "similarity_only"
+    ) -> List[Dict]:
+        """
+        Выполняет reranking документов для улучшения релевантности.
+
+        Args:
+            query: Исходный запрос пользователя
+            documents: Список документов с similarity_score
+            method: Метод reranking ('similarity_only', 'length_boost', 'recency')
+
+        Returns:
+            Отсортированный список документов с обновленными scores
+        """
+        if not documents:
+            return []
+
+        logger.info(f"Reranking {len(documents)} documents using method: {method}")
+
+        reranked_docs = []
+
+        for doc in documents:
+            original_score = doc.get('similarity_score', 0.0)
+            reranked_doc = doc.copy()
+
+            if method == "similarity_only":
+                # Простая сортировка по исходной релевантности
+                reranked_score = original_score
+
+            elif method == "length_boost":
+                # Учитываем длину текста (предпочитаем более длинные ответы)
+                text_length = len(doc.get('text', ''))
+                length_boost = min(text_length / 1000, 0.2)  # Максимум +0.2 к score
+                reranked_score = original_score + length_boost
+
+            elif method == "recency":
+                # Учитываем свежесть документа (если есть метаданные)
+                metadata = doc.get('metadata', {})
+                # Проверяем наличие информации о дате в метаданных
+                if 'created_at' in metadata:
+                    try:
+                        from datetime import datetime
+                        doc_date = datetime.fromisoformat(metadata['created_at'])
+                        days_old = (datetime.now() - doc_date).days
+                        recency_boost = max(0, 1 - days_old / 365) * 0.1  # Максимум +0.1
+                        reranked_score = original_score + recency_boost
+                    except:
+                        reranked_score = original_score
+                else:
+                    reranked_score = original_score
+
+            else:
+                reranked_score = original_score
+
+            # Ограничиваем score в диапазоне [0, 1]
+            reranked_score = max(0.0, min(1.0, reranked_score))
+
+            reranked_doc['reranked_score'] = reranked_score
+            reranked_doc['reranking_method'] = method
+            reranked_docs.append(reranked_doc)
+
+        # Сортируем по новому score
+        reranked_docs.sort(key=lambda x: x['reranked_score'], reverse=True)
+
+        logger.info(f"Documents reranked. Top score: {reranked_docs[0]['reranked_score']:.3f}")
+
+        return reranked_docs
+
+    def get_documents_for_comparison(
+        self,
+        query: str,
+        variant_a_count: int = 5,
+        variant_b_count: int = 5
+    ) -> Tuple[List[Dict], List[Dict]]:
+        """
+        Готовит два набора документов для сравнения RAG.
+
+        Args:
+            query: Поисковый запрос
+            variant_a_count: Количество документов для варианта A (случайная выборка)
+            variant_b_count: Количество документов для варианта B (с reranking)
+
+        Returns:
+            Кортеж (variant_a_docs, variant_b_docs)
+        """
+        # Получаем все релевантные документы (больше чем нужно)
+        all_results = self.search_relevant_context(
+            query=query,
+            top_k=max(variant_a_count, variant_b_count) * 2,  # Берем больше для выбора
+            min_similarity=0.3  # Снижаем порог для большего покрытия
+        )
+
+        if not all_results:
+            return [], []
+
+        # Вариант A: случайная выборка без reranking
+        import random
+        variant_a_docs = random.sample(
+            all_results,
+            min(variant_a_count, len(all_results))
+        )
+
+        # Вариант B: топ документы с reranking
+        reranked_docs = self.rerank_documents(query, all_results, method="similarity_only")
+        variant_b_docs = reranked_docs[:variant_b_count]
+
+        logger.info(
+            f"Prepared documents for comparison: "
+            f"variant_a={len(variant_a_docs)}, variant_b={len(variant_b_docs)}"
+        )
+
+        return variant_a_docs, variant_b_docs

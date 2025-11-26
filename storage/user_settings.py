@@ -36,6 +36,8 @@ class UserSettings:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
+                
+                # Сначала создаём таблицу без rag_comparison_enabled
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS user_settings (
                         user_id INTEGER PRIMARY KEY,
@@ -45,10 +47,27 @@ class UserSettings:
                     )
                 """)
 
-                # Создаём индекс для быстрого поиска
+                # Создаём индексы для быстрого поиска
                 cursor.execute("""
                     CREATE INDEX IF NOT EXISTS idx_user_settings_provider
                     ON user_settings(selected_provider)
+                """)
+
+                # Проверяем наличие колонки rag_comparison_enabled и добавляем если нужно
+                cursor.execute("PRAGMA table_info(user_settings)")
+                columns = [column[1] for column in cursor.fetchall()]
+                
+                if 'rag_comparison_enabled' not in columns:
+                    cursor.execute("""
+                        ALTER TABLE user_settings 
+                        ADD COLUMN rag_comparison_enabled BOOLEAN DEFAULT FALSE
+                    """)
+                    logger.info("Добавлена колонка rag_comparison_enabled в таблицу user_settings")
+
+                # Создаём индекс для rag_comparison_enabled после добавления колонки
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_user_settings_rag_comparison
+                    ON user_settings(rag_comparison_enabled)
                 """)
 
                 conn.commit()
@@ -236,3 +255,89 @@ class UserSettings:
                 "yandex_users": 0,
                 "deepseek_users": 0
             }
+
+    def get_rag_comparison_enabled(self, user_id: int) -> bool:
+        """
+        Получить статус режима сравнения RAG для пользователя.
+
+        Args:
+            user_id: ID пользователя в Telegram
+
+        Returns:
+            True если режим включен, False в противном случае
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT rag_comparison_enabled FROM user_settings WHERE user_id = ?",
+                    (user_id,)
+                )
+                result = cursor.fetchone()
+
+                if result:
+                    enabled = bool(result[0])
+                    logger.debug(f"Режим сравнения RAG для пользователя {user_id}: {enabled}")
+                    return enabled
+                else:
+                    # Новый пользователь - режим выключен
+                    logger.debug(f"Новый пользователь {user_id}, режим сравнения RAG выключен")
+                    return False
+
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка получения режима сравнения RAG для пользователя {user_id}: {e}")
+            return False  # Fallback на выключенный режим
+
+    def set_rag_comparison_enabled(self, user_id: int, enabled: bool) -> bool:
+        """
+        Установить статус режима сравнения RAG для пользователя.
+
+        Args:
+            user_id: ID пользователя в Telegram
+            enabled: True для включения режима, False для выключения
+
+        Returns:
+            True если успешно, False в случае ошибки
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # Используем UPSERT (INSERT ... ON CONFLICT)
+                cursor.execute("""
+                    INSERT INTO user_settings (user_id, rag_comparison_enabled, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        rag_comparison_enabled = excluded.rag_comparison_enabled,
+                        updated_at = excluded.updated_at
+                """, (user_id, enabled, datetime.now()))
+
+                conn.commit()
+                logger.info(f"Режим сравнения RAG для пользователя {user_id} установлен: {enabled}")
+                return True
+
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка установки режима сравнения RAG для пользователя {user_id}: {e}")
+            return False
+
+    def toggle_rag_comparison(self, user_id: int) -> bool:
+        """
+        Переключить режим сравнения RAG (включить/выключить).
+
+        Args:
+            user_id: ID пользователя в Telegram
+
+        Returns:
+            Новое состояние режима (True если включен, False если выключен)
+        """
+        current_state = self.get_rag_comparison_enabled(user_id)
+        new_state = not current_state
+        
+        success = self.set_rag_comparison_enabled(user_id, new_state)
+        
+        if success:
+            logger.info(f"Режим сравнения RAG переключен для пользователя {user_id}: {new_state}")
+            return new_state
+        else:
+            logger.error(f"Не удалось переключить режим сравнения RAG для пользователя {user_id}")
+            return current_state  # Возвращаем текущее состояние при ошибке

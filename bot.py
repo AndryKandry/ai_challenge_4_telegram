@@ -35,6 +35,9 @@ from storage import UserSettings
 # Импорт RAG модуля
 from src.rag_integration import RAGManager
 
+# Импорт модуля сравнения RAG
+from src.rag_comparison import RAGComparisonManager
+
 # Настройка логирования
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -252,6 +255,15 @@ class TelegramBot:
         self.memory.create_tables()
         logger.info("Система памяти инициализирована")
 
+        # Инициализация менеджера сравнения RAG (если доступен DeepSeek)
+        self.rag_comparison_manager = None
+        if self.rag_manager and self.deepseek_provider:
+            self.rag_comparison_manager = RAGComparisonManager(
+                self.rag_manager,
+                self.deepseek_provider
+            )
+            logger.info("RAG Comparison Manager инициализирован")
+
         # Регистрация обработчиков команд
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
@@ -279,6 +291,9 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("yandex", self.yandex_command))
         self.application.add_handler(CommandHandler("deepseek", self.deepseek_command))
         self.application.add_handler(CommandHandler("model", self.model_command))
+
+        # Команда управления режимом сравнения RAG
+        self.application.add_handler(CommandHandler("rag_reranking", self.rag_reranking_command))
 
         # Обработчик ошибок
         self.application.add_error_handler(self.error_handler)
@@ -314,6 +329,8 @@ class TelegramBot:
             "/test_temperature - Сравнить работу LLM при разных температурах\n\n"
             "🛠 MCP Инструменты (Погода):\n"
             "/mcp_tools - Показать доступные инструменты для погоды\n\n"
+            "🔄 Сравнение RAG:\n"
+            "/rag_reranking - Режим сравнения RAG с reranking и без\n\n"
             "❓ Используй /help для полной справки."
         )
         await update.message.reply_text(welcome_message)
@@ -360,6 +377,8 @@ class TelegramBot:
             "• 0.0 = детерминированность (точные ответы)\n"
             "• 0.7 = баланс (универсальный режим)\n"
             "• 1.0 = креативность (оригинальные идеи)\n\n"
+            "🔄 Сравнение RAG (только DeepSeek):\n"
+            "/rag_reranking - Включить/выключить режим сравнения RAG\n\n"
             "🛠 MCP (Model Context Protocol):\n"
             "/mcp_tools - Получить список доступных MCP инструментов\n\n"
             "MCP позволяет боту подключаться к внешним инструментам.\n"
@@ -542,12 +561,41 @@ class TelegramBot:
 
         return parts
 
+    async def rag_reranking_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /rag_reranking - переключение режима сравнения RAG."""
+        user_id = update.effective_user.id
+        
+        # Проверяем доступность RAG сравнения
+        if not self.rag_comparison_manager:
+            error_message = (
+                "❌ Режим сравнения RAG недоступен\n\n"
+                "Для работы этой функции необходимы:\n"
+                "• DeepSeek провайдер\n"
+                "• RAG Manager\n"
+                "• Индексированные документы\n\n"
+                "Проверьте настройки бота."
+            )
+            await update.message.reply_text(error_message)
+            logger.warning(f"Пользователь {user_id} пытался использовать RAG сравнение, но оно недоступно")
+            return
+
+        # Получаем текущего провайдера
+        current_provider = self.user_settings.get_provider(user_id)
+        
+        # Переключаем режим сравнения
+        new_state, message = self.rag_comparison_manager.toggle_comparison_mode(
+            user_id, current_provider
+        )
+        
+        await update.message.reply_text(message)
+        logger.info(f"Пользователь {user_id}: режим сравнения RAG {new_state}")
+
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         Обработчик текстовых сообщений от пользователя.
 
         Args:
-            update: Об��ект обновления Telegram
+            update: Объект обновления Telegram
             context: Контекст выполнения
         """
         user_message = update.message.text
@@ -568,6 +616,137 @@ class TelegramBot:
             logger.warning(f"Отклонено длинное сообщение от пользователя {user_id}: {len(user_message)} символов")
             return
 
+        # Проверяем, включен ли режим сравнения RAG
+        if (self.rag_comparison_manager and 
+            self.rag_comparison_manager.is_comparison_mode(user_id)):
+            
+            # Получаем текущего провайдера для проверки
+            current_provider = self.user_settings.get_provider(user_id)
+            
+            if current_provider != "deepseek" or not self.deepseek_provider:
+                error_message = (
+                    "⚠️ Режим сравнения RAG доступен только для DeepSeek модели\n\n"
+                    "Пожалуйста, переключитесь на DeepSeek:\n"
+                    "/deepseek\n\n"
+                    "Или выключите режим сравнения:\n"
+                    "/rag_reranking"
+                )
+                await update.message.reply_text(error_message)
+                return
+
+            # Обрабатываем в режиме сравнения RAG
+            await self._handle_rag_comparison_message(update, context, user_message, user_id, chat_id)
+            return
+
+        # Стандартная обработка сообщения
+        await self._handle_standard_message(update, context, user_message, user_id, chat_id)
+
+    async def _handle_rag_comparison_message(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
+        user_message: str, user_id: int, chat_id: int
+    ) -> None:
+        """
+        Обработка сообщения в режиме сравнения RAG.
+
+        Args:
+            update: Объект обновления Telegram
+            context: Контекст выполнения
+            user_message: Сообщение от пользователя
+            user_id: ID пользователя
+            chat_id: ID чата
+        """
+        logger.info(f"Обработка сообщения {user_id} в режиме сравнения RAG")
+
+        # Получение или создание активной сессии
+        session_id = self.memory.get_active_session(user_id, chat_id)
+        if not session_id:
+            session_id = self.memory.create_session(user_id, chat_id)
+            logger.info(f"Создана новая сессия {session_id} для пользователя {user_id}")
+
+        # Сохранение сообщения пользователя в БД
+        start_time = time.time()
+        try:
+            self.memory.save_message(user_id, chat_id, user_message, "user", session_id)
+            logger.debug(f"Сообщение пользователя {user_id} сохранено в БД")
+        except Exception as e:
+            logger.error(f"Ошибка сохранения сообщения пользователя: {e}")
+
+        # Получение истории диалога для контекста
+        conversation_history = self.memory.get_conversation_history(
+            user_id, chat_id, limit=10, session_id=session_id
+        )
+        logger.info(f"Загружено {len(conversation_history)} сообщений из истории сессии {session_id}")
+
+        # Отправка индикатора набора текста
+        await update.message.chat.send_action("typing")
+
+        # Выполнение сравнения RAG
+        try:
+            system_prompt = SYSTEM_PROMPT_DEFAULT  # Используем стандартный промпт
+            
+            # Выполняем сравнение
+            comparison_result = await self.rag_comparison_manager.compare_rag_responses(
+                user_message, system_prompt, conversation_history
+            )
+
+            if comparison_result:
+                # Форматируем и отправляем результат
+                formatted_result = self.rag_comparison_manager.format_comparison_result(
+                    comparison_result
+                )
+                
+                # Отправляем результат (может быть длинным)
+                if len(formatted_result) <= 4096:
+                    await update.message.reply_text(formatted_result)
+                else:
+                    # Разбиваем на части
+                    parts = self._split_long_message(formatted_result, 4096)
+                    for part in parts:
+                        await update.message.reply_text(part)
+                        await asyncio.sleep(0.5)
+                
+                logger.info(f"Отправлен результат сравнения RAG пользователю {user_id}")
+                
+                # Сохраняем ответ ассистента в БД (используем вариант B как основной)
+                assistant_response = comparison_result.variant_b.response_text
+                try:
+                    self.memory.save_message(user_id, chat_id, assistant_response, "assistant", session_id)
+                    logger.debug(f"Ответ ассистента для пользователя {user_id} сохранен в БД")
+                except Exception as e:
+                    logger.error(f"Ошибка сохранения ответа ассистента: {e}")
+                    
+            else:
+                error_message = (
+                    "❌ Не удалось выполнить сравнение RAG\n\n"
+                    "Возможные причины:\n"
+                    "• Нет индексированных документов\n"
+                    "• Ошибка поиска релевантного контекста\n\n"
+                    "Попробуйте позже или обратитесь к администратору."
+                )
+                await update.message.reply_text(error_message)
+
+        except Exception as e:
+            logger.error(f"Ошибка при сравнении RAG для пользователя {user_id}: {e}", exc_info=True)
+            error_message = (
+                "❌ Произошла ошибка при сравнении RAG\n\n"
+                "Пожалуйста, попробуйте позже."
+            )
+            await update.message.reply_text(error_message)
+
+    async def _handle_standard_message(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+        user_message: str, user_id: int, chat_id: int
+    ) -> None:
+        """
+        Стандартная обработка сообщения (без режима сравнения RAG).
+
+        Args:
+            update: Объект обновления Telegram
+            context: Контекст выполнения
+            user_message: Сообщение от пользователя
+            user_id: ID пользователя
+            chat_id: ID чата
+        """
         # Получение или создание активной сессии
         session_id = self.memory.get_active_session(user_id, chat_id)
         if not session_id:
