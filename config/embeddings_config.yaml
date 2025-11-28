@@ -71,6 +71,36 @@ search:
     isolate_by_user: true  # Изолировать поиск по документам пользователя
     include_global_docs: true  # Включать общие документы из rag_docs
 
+# Настройки реранкинга
+reranker:
+  type: "simple"  # "simple" или "ollama"
+  params:
+    # Для "ollama"
+    model_name: "bge-reranker-base"
+    ollama_url: "http://localhost:11434"
+    timeout: 30
+    max_retries: 3
+    retry_delay: 1.0
+    
+    # Для "simple"
+    weight_similarity: 0.7
+    weight_length: 0.3
+
+# Настройки цитирования
+citation:
+  enabled: true
+  default_sources_count: 5
+  # Шаблон для промпта с цитированием
+  citation_template: |
+    {citation_instruction}
+
+    Контекст из документации:
+    ---
+    {context}
+    ---
+
+    Вопрос пользователя: {query}
+
 # Настройки интеграции с DeepSeek
 deepseek_integration:
   context_chunks: 3

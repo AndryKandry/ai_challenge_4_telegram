@@ -151,7 +151,7 @@ class DeepSeekProvider(LLMProvider):
         conversation_history: Optional[List[Dict[str, str]]] = None
     ) -> Tuple[Optional[str], List[Dict]]:
         """
-        Генерация ответа от DeepSeek с информацией об источниках RAG.
+        Генерация ответа от DeepSeek с информацией об источниках RAG и обязательным цитированием.
 
         Args:
             user_message: Сообщение от пользователя
@@ -159,7 +159,7 @@ class DeepSeekProvider(LLMProvider):
             conversation_history: История диалога
 
         Returns:
-            Кортеж (ответ от DeepSeek, список источников RAG)
+            Кортеж (ответ от DeepSeek с цитатами, список источников RAG)
         """
         rag_sources = []
         enriched_message = user_message
@@ -167,8 +167,19 @@ class DeepSeekProvider(LLMProvider):
         # Применяем RAG если доступен
         if self.rag_manager:
             try:
-                enriched_message, rag_sources = self.rag_manager.enrich_message_with_rag(user_message)
+                enriched_message, rag_sources = self.rag_manager.enrich_message_with_rag(
+                    user_message, 
+                    use_reranking=True
+                )
                 logger.info(f"Message enriched with {len(rag_sources)} RAG sources")
+                
+                # Если есть RAG источники, создаем промпт с цитированием
+                if rag_sources:
+                    enriched_message = self.rag_manager.create_citation_prompt(
+                        user_message, 
+                        rag_sources
+                    )
+                    
             except Exception as e:
                 logger.error(f"Error enriching message with RAG: {e}")
 
@@ -200,7 +211,14 @@ class DeepSeekProvider(LLMProvider):
             # Извлекаем ответ
             if response.choices and len(response.choices) > 0:
                 assistant_message = response.choices[0].message.content
-                logger.info("Получен ответ от DeepSeek API")
+                
+                # Добавляем цитаты если были использованы источники RAG
+                if rag_sources and self.rag_manager:
+                    citations = self.rag_manager.format_citations(rag_sources)
+                    if citations:
+                        assistant_message += citations
+                
+                logger.info("Получен ответ от DeepSeek API с цитированием")
                 logger.debug(f"Длина ответа: {len(assistant_message) if assistant_message else 0} символов")
                 return assistant_message, rag_sources
             else:

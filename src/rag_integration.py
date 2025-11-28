@@ -10,6 +10,7 @@ from pathlib import Path
 
 from src.embeddings.embedder import OllamaEmbedder
 from src.embeddings.searcher import SemanticSearcher
+from src.embeddings.reranker import create_reranker
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,29 @@ class RAGManager:
             index_path=self.index_path,
             embedder=self.embedder
         )
+
+        # Инициализация реранкера
+        reranker_config = self.config.get('reranker', {})
+        reranker_type = reranker_config.get('type', 'simple')
+        reranker_params = reranker_config.get('params', {})
+        
+        # Фильтруем параметры в зависимости от типа реранкера
+        if reranker_type == 'simple':
+            # SimpleReranker принимает только weight_similarity и weight_length
+            filtered_params = {
+                k: v for k, v in reranker_params.items() 
+                if k in ['weight_similarity', 'weight_length']
+            }
+        else:
+            # OllamaReranker принимает все параметры
+            filtered_params = reranker_params
+        
+        self.reranker = create_reranker(reranker_type, **filtered_params)
+        
+        # Параметры цитирования
+        self.citation_config = self.config.get('citation', {})
+        self.default_sources_count = self.citation_config.get('default_sources_count', 5)
+        self.enable_citations = self.citation_config.get('enabled', True)
 
         self.enabled = True
 
@@ -190,13 +214,15 @@ class RAGManager:
 
     def enrich_message_with_rag(
         self,
-        user_message: str
+        user_message: str,
+        use_reranking: bool = True
     ) -> Tuple[str, List[Dict]]:
         """
         Обогащает сообщение пользователя контекстом из RAG.
 
         Args:
             user_message: Исходное сообщение
+            use_reranking: Использовать ли реранкинг
 
         Returns:
             Кортеж (обогащенное_сообщение, список_источников)
@@ -206,21 +232,174 @@ class RAGManager:
             logger.debug("RAG not triggered for this message")
             return user_message, []
 
-        # Ищем релевантный контекст
-        search_results = self.search_relevant_context(user_message)
+        # Ищем релевантный контекст (используем больше документов для реранкинга)
+        initial_top_k = self.context_chunks * 2 if use_reranking else self.context_chunks
+        search_results = self.search_relevant_context(user_message, top_k=initial_top_k)
 
         if not search_results:
             logger.info("No relevant context found, returning original message")
             return user_message, []
 
+        # Применяем реранкинг если включен
+        if use_reranking and len(search_results) > 1:
+            search_results = self.reranker.rerank(
+                query=user_message,
+                documents=search_results,
+                top_k=self.context_chunks
+            )
+            logger.info(f"Applied reranking, got {len(search_results)} results")
+        
+        # Обогащаем метаданные для цитирования
+        enhanced_results = self._enrich_with_citation_metadata(search_results)
+
         # Форматируем обогащенное сообщение
-        enriched_message = self.format_rag_context(user_message, search_results)
+        enriched_message = self.format_rag_context(user_message, enhanced_results)
 
         logger.info(
-            f"Message enriched with {len(search_results)} relevant documents"
+            f"Message enriched with {len(enhanced_results)} relevant documents"
         )
 
-        return enriched_message, search_results
+        return enriched_message, enhanced_results
+
+    def _enrich_with_citation_metadata(self, search_results: List[Dict]) -> List[Dict]:
+        """
+        Обогащает результаты поиска метаданными для цитирования.
+
+        Args:
+            search_results: Результаты поиска
+
+        Returns:
+            Обогащенные результаты с метаданными для цитирования
+        """
+        enhanced_results = []
+        
+        for i, result in enumerate(search_results):
+            enhanced_result = result.copy()
+            
+            # Вычисляем релевантность в процентах
+            similarity = result.get('similarity_score', 0.0)
+            rerank_score = result.get('rerank_score', similarity)
+            relevance_percentage = max(similarity, rerank_score) * 100
+            
+            # Добавляем метаданные для цитирования
+            enhanced_result.update({
+                'citation_index': i + 1,
+                'source_file_name': Path(result['source_file']).name,
+                'chunk_id': result.get('chunk_id', f'chunk_{i}'),
+                'line_numbers': self._extract_line_numbers(result),
+                'relevance_score': relevance_percentage,
+                'relevance_percentage': f"{relevance_percentage:.0f}%"
+            })
+            
+            enhanced_results.append(enhanced_result)
+        
+        return enhanced_results
+
+    def _extract_line_numbers(self, result: Dict) -> str:
+        """
+        Извлекает номера строк из метаданных результата.
+
+        Args:
+            result: Результат поиска
+
+        Returns:
+            Строка с номерами строк
+        """
+        metadata = result.get('metadata', {})
+        
+        # Пытаемся получить номера строк из метаданных
+        char_start = metadata.get('char_start')
+        char_end = metadata.get('char_end')
+        
+        if char_start is not None and char_end is not None:
+            # Приблизительное определение строк (примерно 50 символов на строку)
+            line_start = max(1, char_start // 50 + 1)
+            line_end = max(line_start, char_end // 50 + 1)
+            return f"{line_start}-{line_end}"
+        
+        # Fallback: используем chunk_index
+        chunk_index = result.get('chunk_index', 0)
+        return f"{chunk_index * 10 + 1}-{chunk_index * 10 + 20}"
+
+    def format_citations(self, search_results: List[Dict], max_sources: Optional[int] = None) -> str:
+        """
+        Форматирует цитаты для включения в ответ модели.
+
+        Args:
+            search_results: Результаты поиска RAG
+            max_sources: Максимальное количество источников (если None, используется из конфига)
+
+        Returns:
+            Отформатированная строка с цитатами
+        """
+        if not search_results or not self.enable_citations:
+            return ""
+        
+        # Ограничиваем количество источников
+        max_sources = max_sources or self.default_sources_count
+        sources_to_use = search_results[:max_sources]
+        
+        citations = "\n\nИсточники:\n"
+        
+        for result in sources_to_use:
+            citation_index = result.get('citation_index', 0)
+            source_file = result.get('source_file_name', 'unknown')
+            chunk_id = result.get('chunk_id', 'unknown')
+            line_numbers = result.get('line_numbers', 'unknown')
+            relevance = result.get('relevance_percentage', '0%')
+            
+            citations += (
+                f"[{citation_index}] Источник: {source_file}, "
+                f"чанк {chunk_id}, строки {line_numbers}, "
+                f"релевантность: {relevance}\n"
+            )
+        
+        return citations
+
+    def create_citation_prompt(self, user_message: str, search_results: List[Dict]) -> str:
+        """
+        Создает промпт для DeepSeek с требованием цитирования источников.
+
+        Args:
+            user_message: Исходное сообщение пользователя
+            search_results: Результаты поиска
+
+        Returns:
+            Промпт с требованием цитирования
+        """
+        if not search_results or not self.enable_citations:
+            return user_message
+        
+        citation_instruction = """
+ВАЖНО: Вы должны включить цитаты на источники в свой ответ.
+
+Инструкция по цитированию:
+- Используйте информацию из предоставленного контекста
+- Включайте ссылки на источники в квадратных скобках [1], [2] и т.д.
+- Номер в скобках должен соответствовать номеру источника в списке
+- Ссылки должны размещаться после информации, которая взята из данного источника
+- Если информация из нескольких источников, перечислите все номера через запятую: [1,3]
+
+Пример цитирования в ответе:
+"Согласно документации [1], система работает с эмбеддингами размером 1024 [2,3]."
+
+Формат источников будет предоставлен после вашего ответа.
+"""
+        
+        # Получаем шаблон из конфига или используем стандартный
+        deepseek_config = self.config.get('deepseek_integration', {})
+        template = deepseek_config.get('citation_template')
+        
+        if template:
+            return template.format(
+                citation_instruction=citation_instruction,
+                context=self.format_rag_context(user_message, search_results),
+                query=user_message
+            )
+        else:
+            # Стандартный формат с цитированием
+            context = self.format_rag_context(user_message, search_results)
+            return f"{citation_instruction}\n\n{context}"
 
     def format_sources_info(self, search_results: List[Dict]) -> str:
         """
@@ -277,7 +456,8 @@ class RAGManager:
                 'total_chunks': index_info.get('total_chunks', 0),
                 'keywords_count': len(self.rag_keywords),
                 'top_k': self.context_chunks,
-                'min_similarity': self.min_similarity
+                'min_similarity': self.min_similarity,
+                'context_chunks': self.context_chunks
             }
         except Exception as e:
             logger.error(f"Failed to get RAG statistics: {e}")
