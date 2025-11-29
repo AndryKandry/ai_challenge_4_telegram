@@ -212,11 +212,16 @@ class DeepSeekProvider(LLMProvider):
             if response.choices and len(response.choices) > 0:
                 assistant_message = response.choices[0].message.content
                 
-                # Добавляем цитаты если были использованы источники RAG
-                if rag_sources and self.rag_manager:
+            # Добавляем цитаты если были использованы источники RAG
+            if rag_sources and self.rag_manager:
+                # Используем кликабельные ссылки если доступны
+                if hasattr(self.rag_manager, 'enable_clickable_links') and self.rag_manager.enable_clickable_links:
+                    citations = self.rag_manager.format_clickable_sources(rag_sources)
+                else:
                     citations = self.rag_manager.format_citations(rag_sources)
-                    if citations:
-                        assistant_message += citations
+                
+                if citations:
+                    assistant_message += citations
                 
                 logger.info("Получен ответ от DeepSeek API с цитированием")
                 logger.debug(f"Длина ответа: {len(assistant_message) if assistant_message else 0} символов")

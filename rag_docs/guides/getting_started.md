@@ -13,7 +13,7 @@ pip install -r requirements.txt
 Создайте файл `.env` в корневой директории проекта:
 
 ```env
-TELEGRAM_TOKEN=ваш_telegram_bot_token
+TELEGRAM_TOKEN=ваш_TELEGRAM_TOKEN
 YANDEX_API_KEY=ваш_yandex_api_key
 YANDEX_FOLDER_ID=ваш_yandex_folder_id
 OPENAI_API_KEY=ваш_openai_api_key

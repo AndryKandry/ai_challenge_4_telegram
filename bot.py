@@ -34,6 +34,7 @@ from storage import UserSettings
 
 # Импорт RAG модуля
 from src.rag_integration import RAGManager
+from src.integrations.telegram_document_handler import create_telegram_document_handler
 
 # Настройка логирования
 logging.basicConfig(
@@ -211,6 +212,16 @@ class TelegramBot:
             logger.warning(f"RAG Manager не инициализирован: {e}")
             self.rag_manager = None
 
+        # Инициализация Telegram документ хендлера
+        try:
+            self.document_handler = create_telegram_document_handler(self.rag_manager)
+            if self.rag_manager:
+                self.rag_manager.set_document_handler(self.document_handler)
+            logger.info("Telegram document handler инициализирован")
+        except Exception as e:
+            logger.warning(f"Telegram document handler не инициализирован: {e}")
+            self.document_handler = None
+
         self.deepseek_provider = None
         if deepseek_api_key:
             # Передаём RAG Manager в DeepSeek провайдер
@@ -287,6 +298,10 @@ class TelegramBot:
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message)
         )
+
+        # Обработчик callback запросов для inline кнопок
+        from telegram.ext import CallbackQueryHandler
+        self.application.add_handler(CallbackQueryHandler(self.handle_callback_query))
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик команды /start."""
@@ -547,7 +562,7 @@ class TelegramBot:
         Обработчик текстовых сообщений от пользователя.
 
         Args:
-            update: Об��ект обновления Telegram
+            update: Объект обновления Telegram
             context: Контекст выполнения
         """
         user_message = update.message.text
@@ -698,8 +713,21 @@ class TelegramBot:
                 # Добавляем информацию об источниках RAG только в текстовом режиме
                 # и только если используется DeepSeek
                 if rag_sources and selected_provider == "deepseek":
-                    sources_info = self.rag_manager.format_sources_info(rag_sources)
-                    formatted_response += sources_info
+                    # Используем inline кнопки если доступны
+                    if hasattr(self.rag_manager, 'enable_clickable_links') and self.rag_manager.enable_clickable_links and self.document_handler:
+                        sources_text, inline_keyboard = self.rag_manager.format_sources_with_telegram_buttons(
+                            rag_sources, 
+                            title="📚 **Источники:**"
+                        )
+                        formatted_response += sources_text
+                        
+                        # Отправляем ответ с кнопками отдельно
+                        await update.message.reply_text(formatted_response, reply_markup=inline_keyboard)
+                        logger.info(f"Отправлен ответ с inline кнопками пользователю {user_id}")
+                        return  # Выходим чтобы не отправлять второй раз
+                    else:
+                        sources_info = self.rag_manager.format_sources_info(rag_sources)
+                        formatted_response += sources_info
 
             elif mode == "json":
                 formatted_response = self.format_manager.format_json_output(response)
@@ -1248,7 +1276,7 @@ class TelegramBot:
                     "Провайдер: DeepSeek\n\n"
                     "Альтернативы:\n"
                     "/openai - OpenAI GPT\n"
-                    "/yandex - Yandex GPT"
+                    "/yandex - Yandex GPT\n"
                 )
             else:
                 message = (
@@ -1269,126 +1297,93 @@ class TelegramBot:
         await update.message.reply_text(message)
         logger.info(f"Пользователь {user_id} проверил текущую модель: {provider}")
 
-    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
-        Обработчик ошибок для логирования и уведомления пользователя.
-
+        Обработчик callback запросов от inline кнопок.
+        
         Args:
-            update: Объект обновления (может быть None)
-            context: Контекст с информацией об ошибке
+            update: Объект обновления Telegram
+            context: Контекст выполнения
         """
-        # Логируем ошибку
-        logger.error("Произошла ошибка при обработке обновления:", exc_info=context.error)
+        query = update.callback_query
+        user_id = query.from_user.id
+        
+        logger.info(f"Получен callback запрос от пользователя {user_id}: {query.data}")
+        
+        try:
+            # Показываем индикатор обработки
+            await query.answer("Обрабатываю запрос...")
+            
+            # Парсим данные callback
+            callback_data = query.data
+            
+            if callback_data.startswith("doc:"):
+                # Обработка нажатий на inline кнопки документов
+                if self.rag_manager and self.rag_manager.document_handler:
+                    try:
+                        await self.rag_manager.document_handler.handle_document_callback(update, context)
+                        logger.info(f"Обработано нажатие на кнопку документа пользователем {user_id}")
+                    except Exception as e:
+                        logger.error(f"Ошибка обработки кнопки документа: {e}")
+                        await query.message.reply_text(
+                            "❌ Ошибка при открытии документа. Попробуйте позже."
+                        )
+                else:
+                    error_message = "❌ Обработчик документов недоступен"
+                    await query.message.reply_text(error_message)
+                    logger.warning(f"Document handler недоступен для пользователя {user_id}")
+            else:
+                # Неизвестный callback
+                await query.message.reply_text("❌ Неизвестная команда")
+                logger.warning(f"Получен неизвестный callback: {callback_data}")
+                
+        except Exception as e:
+            logger.error(f"Ошибка обработки callback запроса: {e}")
+            await query.message.reply_text("❌ Ошибка обработки запроса")
 
-        # Специальная обработка для сетевых ошибок
-        from telegram.error import TimedOut, NetworkError
-
-        if isinstance(context.error, (TimedOut, NetworkError)):
-            logger.warning(
-                f"Сетевая ошибка: {context.error.__class__.__name__}. "
-                "Возможны проблемы с интернет-соединением."
-            )
-            # Не отправляем сообщение пользователю при таймауте,
-            # т.к. это может вызвать новый таймаут
-            return
-
-        # Для других ошибок пытаемся уведомить пользователя
-        if update and isinstance(update, Update) and update.effective_message:
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик ошибок бота."""
+        logger.error(f"Произошла ошибка: {context.error}", exc_info=True)
+        
+        if update and hasattr(update, 'message') and update.message:
             try:
-                await update.effective_message.reply_text(
-                    "⚠️ Произошла ошибка при обработке вашего запроса.\n"
-                    "Пожалуйста, попробуйте еще раз через несколько секунд."
+                await update.message.reply_text(
+                    "❌ Произошла внутренняя ошибка. Попробуйте позже."
                 )
-            except Exception as e:
-                # Если не удалось отправить сообщение об ошибке, просто логируем
-                logger.error(f"Не удалось отправить сообщение об ошибке: {e}")
-
-    def run(self) -> None:
-        """Запуск бота."""
-        logger.info("Запуск Telegram бота...")
-        # В версии 22+ run_polling() автоматически инициализирует и останавливает приложение
-        # Добавляем параметры для более корректной обработки ошибок
-        self.application.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True  # Игнорируем старые обновления при запуске
-        )
+            except Exception:
+                pass  # Игнорируем ошибки при отправке сообщения об ошибке
 
 
-def validate_environment() -> tuple[str, str, Optional[str], Optional[str]]:
-    """
-    Проверка наличия необходимых переменных окружения.
-
-    Returns:
-        Кортеж (telegram_token, yandex_api_key, openai_api_key, deepseek_api_key)
-
-    Raises:
-        ValueError: Если не заданы необходимые переменные окружения
-    """
+def main() -> None:
+    """Главная функция для запуска бота."""
+    # Проверка переменных окружения
     telegram_token = os.getenv("TELEGRAM_TOKEN")
     yandex_api_key = os.getenv("YANDEX_API_KEY")
     openai_api_key = os.getenv("OPENAI_API_KEY")
     deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
 
     if not telegram_token:
-        raise ValueError(
-            "TELEGRAM_TOKEN не задан! Установите переменную окружения: "
-            "export TELEGRAM_TOKEN='your_token_here'"
-        )
+        logger.error("TELEGRAM_TOKEN не найден в переменных окружения")
+        sys.exit(1)
 
     if not yandex_api_key:
-        raise ValueError(
-            "YANDEX_API_KEY не задан! Установите переменную окружения: "
-            "export YANDEX_API_KEY='your_api_key_here'"
-        )
-
-    # Опциональная проверка YANDEX_FOLDER_ID
-    folder_id = os.getenv("YANDEX_FOLDER_ID")
-    if not folder_id:
-        logger.warning(
-            "YANDEX_FOLDER_ID не задан! Может потребоваться для корректной работы с Yandex GPT."
-        )
-
-    # Опциональная проверка OPENAI_API_KEY
-    if not openai_api_key:
-        logger.warning(
-            "OPENAI_API_KEY не задан! OpenAI провайдер будет недоступен."
-        )
-
-    # Опциональная проверка DEEPSEEK_API_KEY
-    if not deepseek_api_key:
-        logger.warning(
-            "DEEPSEEK_API_KEY не задан! DeepSeek провайдер будет недоступен."
-        )
-
-    return telegram_token, yandex_api_key, openai_api_key, deepseek_api_key
-
-
-def main() -> None:
-    """Главная функция запуска бота."""
-    try:
-        # Попытка загрузить переменные из .env файла (опционально)
-        try:
-            from dotenv import load_dotenv
-            load_dotenv()
-            logger.info("Переменные окружения загружены из .env файла")
-        except ImportError:
-            logger.info("python-dotenv не установлен, используются системные переменные окружения")
-
-        # Валидация переменных окружения
-        telegram_token, yandex_api_key, openai_api_key, deepseek_api_key = validate_environment()
-
-        # Создание и запуск бота
-        bot = TelegramBot(telegram_token, yandex_api_key, openai_api_key, deepseek_api_key)
-        bot.run()
-
-    except ValueError as e:
-        logger.error(f"Ошибка конфигурации: {e}")
+        logger.error("YANDEX_API_KEY не найден в переменных окружения")
         sys.exit(1)
-    except KeyboardInterrupt:
-        logger.info("Бот остановлен пользователем")
-        sys.exit(0)
+
+    # Создание и запуск бота
+    try:
+        bot = TelegramBot(
+            telegram_token=telegram_token,
+            yandex_api_key=yandex_api_key,
+            openai_api_key=openai_api_key,
+            deepseek_api_key=deepseek_api_key
+        )
+
+        logger.info("Запуск Telegram бота...")
+        bot.application.run_polling(allowed_updates=Update.ALL_TYPES)
+
     except Exception as e:
-        logger.error(f"Критическая ошибка: {e}", exc_info=True)
+        logger.error(f"Ошибка при запуске бота: {e}", exc_info=True)
         sys.exit(1)
 
 

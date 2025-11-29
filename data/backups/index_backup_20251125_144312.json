@@ -9452,7 +9452,7 @@
       "chunk_id": "getting_started_md_chunk_3",
       "source_file": "/Users/andreykozyrev/PycharmProjects/ai_challenge_4_telegram/rag_docs/guides/getting_started.md",
       "chunk_index": 3,
-      "text": "### Шаг 2: Настройка переменных окружения\n\nСоздайте файл `.env` в корневой директории проекта:\n\n```env\nTELEGRAM_TOKEN=ваш_telegram_bot_token\nYANDEX_API_KEY=ваш_yandex_api_key\nYANDEX_FOLDER_ID=ваш_yandex_folder_id\nOPENAI_API_KEY=ваш_openai_api_key\nDEEPSEEK_API_KEY=ваш_deepseek_api_key\n```",
+      "text": "### Шаг 2: Настройка переменных окружения\n\nСоздайте файл `.env` в корневой директории проекта:\n\n```env\nTELEGRAM_TOKEN=ваш_TELEGRAM_TOKEN\nYANDEX_API_KEY=ваш_yandex_api_key\nYANDEX_FOLDER_ID=ваш_yandex_folder_id\nOPENAI_API_KEY=ваш_openai_api_key\nDEEPSEEK_API_KEY=ваш_deepseek_api_key\n```",
       "metadata": {
         "file_type": "md",
         "char_start": 139,

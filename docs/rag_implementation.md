@@ -413,9 +413,87 @@ ollama:
    - Используйте автоматическую индексацию при добавлении файлов
    - Создавайте backup перед полной переиндексацией
 
+## Кликабельные ссылки на источники
+
+### Обзор
+
+Система поддерживает генерацию кликабельных ссылок на источники документов через MCP (Model Context Protocol) filesystem сервер.
+
+### Функциональность
+
+При использовании DeepSeek с RAG, ответы содержат кликабельные ссылки в формате:
+
+```markdown
+📚 **Источники:**
+1. 📝 [document.md](mcp://filesystem/...) - строки 15-25 (релевантность: 92%)
+2. 📄 [guide.txt](mcp://filesystem/...) - строки 5-15 (релевантность: 87%)
+
+💡 *Нажмите на ссылку чтобы открыть документ через MCP*
+```
+
+### Поддерживаемые форматы
+
+- **TXT файлы** (`.txt`) - 📄
+- **Markdown файлы** (`.md`, `.markdown`) - 📝
+
+### Настройка
+
+```yaml
+# config/embeddings_config.yaml
+mcp_links:
+  enabled: true
+  server_url: "http://localhost:8003"
+  supported_extensions:
+    - ".txt"
+    - ".md"
+    - ".markdown"
+  max_filename_length: 30
+```
+
+### Использование
+
+```python
+from src.rag_integration import RAGManager
+
+rag_manager = RAGManager()
+
+# Поиск с источниками
+enriched_message, sources = rag_manager.enrich_message_with_rag(
+    user_message="Как работает бот?",
+    use_reranking=True
+)
+
+# Форматирование кликабельных ссылок
+clickable_sources = rag_manager.format_clickable_sources(
+    search_results=sources,
+    max_sources=5
+)
+```
+
+### Интеграция с DeepSeek
+
+DeepSeek автоматически использует кликабельные ссылки:
+
+```python
+from providers.deepseek_provider import DeepSeekProvider
+
+# Генерация ответа с кликабельными ссылками
+response, sources = await deepseek.generate_response_with_sources(
+    user_message="Вопрос",
+    system_prompt="Системный промпт"
+)
+# response уже содержит кликабельные ссылки
+```
+
+### Подробнее
+
+- [MCP Filesystem Integration](./mcp_filesystem_integration.md) - Интеграция с filesystem сервером
+- [Source Links Format](./source_links_format.md) - Формат кликабельных ссылок
+
 ## Ссылки
 
 - [Ollama Documentation](https://ollama.com/docs)
 - [bge-m3 Model](https://ollama.com/library/bge-m3)
-- [Embeddings Guide](./embeddings_guide.md)
-- [API Reference](./api_reference.md)
+- [MCP Filesystem Integration](./mcp_filesystem_integration.md)
+- [Source Links Format](./source_links_format.md)
+- [Source Citation System](./source_citation_system.md)

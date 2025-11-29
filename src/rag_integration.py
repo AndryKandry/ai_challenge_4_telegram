@@ -11,6 +11,8 @@ from pathlib import Path
 from src.embeddings.embedder import OllamaEmbedder
 from src.embeddings.searcher import SemanticSearcher
 from src.embeddings.reranker import create_reranker
+from src.integrations.mcp_link_generator import MCPLinkGenerator
+from src.integrations.telegram_document_handler import TelegramDocumentHandler
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +81,23 @@ class RAGManager:
         self.default_sources_count = self.citation_config.get('default_sources_count', 5)
         self.enable_citations = self.citation_config.get('enabled', True)
 
+        # Инициализация MCP генератора ссылок
+        mcp_config = self.config.get('mcp_links', {})
+        mcp_server_url = mcp_config.get('server_url', 'http://localhost:8003')
+        base_path = mcp_config.get('base_path')
+        self.enable_clickable_links = mcp_config.get('enabled', True)
+        
+        self.link_generator = MCPLinkGenerator(
+            mcp_server_url=mcp_server_url,
+            base_path=base_path
+        )
+
+        # Инициализация Telegram обработчика документов
+        self.document_handler = None  # Будет инициализирован позже
+
         self.enabled = True
 
-        logger.info(f"RAGManager initialized: index_path={self.index_path}")
+        logger.info(f"RAGManager initialized: index_path={self.index_path}, clickable_links={self.enable_clickable_links}")
 
     def _load_config(self, config_path: str) -> dict:
         """
@@ -463,6 +479,35 @@ class RAGManager:
             logger.error(f"Failed to get RAG statistics: {e}")
             return {}
 
+    def get_chunk_by_id(self, chunk_id: str) -> Optional[Dict]:
+        """
+        Получает чанк из индекса по его ID.
+
+        Args:
+            chunk_id: ID чанка
+
+        Returns:
+            Словарь с данными чанка или None если не найден
+        """
+        try:
+            # Загружаем индекс если не загружен
+            if not self.searcher.index:
+                self.searcher._load_index()
+
+            chunks = self.searcher.index.get('chunks', [])
+
+            # Ищем чанк по ID
+            for chunk in chunks:
+                if chunk.get('chunk_id') == chunk_id:
+                    return chunk
+
+            logger.warning(f"Chunk not found by ID: {chunk_id}")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error getting chunk by ID: {e}")
+            return None
+
     def enable(self) -> None:
         """Включает RAG."""
         self.enabled = True
@@ -472,3 +517,217 @@ class RAGManager:
         """Отключает RAG."""
         self.enabled = False
         logger.info("RAG disabled")
+
+    def format_clickable_sources(
+        self,
+        search_results: List[Dict],
+        max_sources: Optional[int] = None,
+        title: str = "📚 **Источники:**"
+    ) -> str:
+        """
+        Форматирует кликабельные источники для отображения в Telegram.
+        
+        Args:
+            search_results: Результаты поиска RAG
+            max_sources: Максимальное количество источников
+            title: Заголовок списка источников
+            
+        Returns:
+            Отформатированная строка с кликабельными источниками
+        """
+        if not search_results or not self.enable_clickable_links:
+            return self.format_sources_info(search_results)
+        
+        try:
+            # Фильтруем только поддерживаемые файлы
+            supported_sources = self.link_generator.filter_supported_sources(search_results)
+            
+            if not supported_sources:
+                # Если нет поддерживаемых файлов, используем обычный формат
+                return self.format_sources_info(search_results)
+            
+            # Ограничиваем количество источников
+            max_sources = max_sources or self.default_sources_count
+            sources_to_use = supported_sources[:max_sources]
+            
+            # Форматируем через link generator
+            clickable_sources = self.link_generator.format_clickable_sources(
+                sources_to_use, 
+                max_sources=max_sources, 
+                title=title
+            )
+            
+            return clickable_sources
+            
+        except Exception as e:
+            logger.error(f"Error formatting clickable sources: {e}")
+            # Fallback на обычный формат
+            return self.format_sources_info(search_results)
+
+    def generate_mcp_links_for_sources(
+        self,
+        search_results: List[Dict]
+    ) -> List[Dict]:
+        """
+        Генерирует MCP ссылки для источников.
+        
+        Args:
+            search_results: Результаты поиска RAG
+            
+        Returns:
+            Список источников с добавленными MCP ссылками
+        """
+        if not search_results or not self.enable_clickable_links:
+            return search_results
+        
+        try:
+            enhanced_results = []
+            
+            for result in search_results:
+                enhanced_result = result.copy()
+                
+                # Генерируем MCP ссылку
+                source_file = result.get('source_file', '')
+                line_numbers = result.get('line_numbers', '')
+                
+                if self.link_generator.is_supported_file(source_file):
+                    mcp_link = self.link_generator.generate_file_link(source_file, line_numbers)
+                    enhanced_result['mcp_link'] = mcp_link
+                    
+                    # Добавляем флаг что файл поддерживается
+                    enhanced_result['clickable'] = True
+                else:
+                    enhanced_result['clickable'] = False
+                
+                enhanced_results.append(enhanced_result)
+            
+            return enhanced_results
+            
+        except Exception as e:
+            logger.error(f"Error generating MCP links: {e}")
+            return search_results
+
+    def create_clickable_citation_prompt(
+        self,
+        user_message: str,
+        search_results: List[Dict]
+    ) -> str:
+        """
+        Создает промпт для DeepSeek с требованием цитирования и кликабельных ссылок.
+        
+        Args:
+            user_message: Исходное сообщение пользователя
+            search_results: Результаты поиска
+            
+        Returns:
+            Промпт с требованием цитирования и кликабельных ссылок
+        """
+        if not search_results or not self.enable_citations:
+            return user_message
+        
+        # Генерируем MCP ссылки для источников
+        enhanced_results = self.generate_mcp_links_for_sources(search_results)
+        
+        citation_instruction = """
+ВАЖНО: Вы должны включить цитаты на источники в свой ответ.
+
+Инструкция по цитированию:
+- Используйте информацию из предоставленного контекста
+- Включайте ссылки на источники в квадратных скобках [1], [2] и т.д.
+- Номер в скобках должен соответствовать номеру источника в списке
+- Ссылки должны размещаться после информации, которая взята из данного источника
+- Если информация из нескольких источников, перечислите все номера через запятую: [1,3]
+
+Пример цитирования в ответе:
+"Согласно документации [1], система работает с эмбеддингами размером 1024 [2,3]."
+
+Формат источников будет предоставлен после вашего ответа с кликабельными ссылками для открытия документов.
+"""
+        
+        # Получаем шаблон из конфига или используем стандартный
+        deepseek_config = self.config.get('deepseek_integration', {})
+        template = deepseek_config.get('citation_template')
+        
+        if template:
+            return template.format(
+                citation_instruction=citation_instruction,
+                context=self.format_rag_context(user_message, enhanced_results),
+                query=user_message
+            )
+        else:
+            # Стандартный формат с цитированием
+            context = self.format_rag_context(user_message, enhanced_results)
+            return f"{citation_instruction}\n\n{context}"
+
+    def get_mcp_client_config(self) -> Dict:
+        """
+        Возвращает конфигурацию MCP клиента для filesystem сервера.
+        
+        Returns:
+            Словарь с конфигурацией MCP клиента
+        """
+        if self.enable_clickable_links and self.link_generator:
+            return self.link_generator.create_mcp_client_config()
+        return {}
+
+    def validate_source_file(self, file_path: str) -> Tuple[bool, str]:
+        """
+        Валидирует путь к файлу источника.
+        
+        Args:
+            file_path: Путь к файлу
+            
+        Returns:
+            Кортеж (is_valid, error_message)
+        """
+        if not self.enable_clickable_links or not self.link_generator:
+            return False, "Clickable links disabled"
+        
+        return self.link_generator.validate_file_path(file_path)
+    
+    def set_document_handler(self, document_handler) -> None:
+        """
+        Устанавливает обработчик документов для Telegram.
+        
+        Args:
+            document_handler: TelegramDocumentHandler экземпляр
+        """
+        self.document_handler = document_handler
+        logger.info("Telegram document handler set in RAG manager")
+    
+    def format_sources_with_telegram_buttons(
+        self,
+        search_results: List[Dict],
+        max_sources: Optional[int] = None,
+        title: str = "📚 **Источники:**"
+    ) -> Tuple[str, Optional[object]]:
+        """
+        Форматирует источники с Telegram inline кнопками.
+        
+        Args:
+            search_results: Результаты поиска RAG
+            max_sources: Максимальное количество источников
+            title: Заголовок списка источников
+            
+        Returns:
+            Кортеж (текст_с_заголовком, inline_keyboard)
+        """
+        if not search_results or not self.enable_clickable_links or not self.document_handler:
+            return self.format_sources_info(search_results), None
+        
+        try:
+            # Ограничиваем количество источников
+            max_sources = max_sources or self.default_sources_count
+            sources_to_use = search_results[:max_sources]
+            
+            # Форматируем через document handler
+            return self.document_handler.format_sources_with_buttons(
+                sources_to_use, 
+                max_sources=max_sources, 
+                title=title
+            )
+            
+        except Exception as e:
+            logger.error(f"Error formatting sources with Telegram buttons: {e}")
+            # Fallback на обычный формат
+            return self.format_sources_info(search_results), None

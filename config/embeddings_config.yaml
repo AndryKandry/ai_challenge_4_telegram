@@ -101,6 +101,19 @@ citation:
 
     Вопрос пользователя: {query}
 
+# Настройки кликабельных MCP ссылок
+mcp_links:
+  enabled: true
+  server_url: "http://localhost:8003"
+  base_path: null  # Базовый путь к документам (опционально)
+  # Поддерживаемые расширения файлов
+  supported_extensions:
+    - ".txt"
+    - ".md"
+    - ".markdown"
+  # Максимальная длина имени файла в ссылке
+  max_filename_length: 30
+
 # Настройки интеграции с DeepSeek
 deepseek_integration:
   context_chunks: 3
