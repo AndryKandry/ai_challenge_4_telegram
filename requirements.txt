@@ -10,7 +10,7 @@ httpx>=0.27.0
 openai>=1.0.0
 
 # Загрузка переменных окружения из .env файла (опционально)
-python-dotenv==1.0.0
+python-dotenv>=1.1.0
 
 # MCP (Model Context Protocol) для интеграции с внешними инструментами
 mcp>=1.21.0

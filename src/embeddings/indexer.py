@@ -8,8 +8,10 @@ import logging
 import os
 import shutil
 from datetime import datetime
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Any
 from pathlib import Path
+import ast
+import hashlib
 
 from .chunker import TextChunker
 from .embedder import OllamaEmbedder, OllamaConnectionError
@@ -39,6 +41,7 @@ class DocumentIndexer:
     - Сохранение и загрузка индекса
     - Создание резервных копий
     - Отслеживание изменений файлов по хэшу
+    - Обогащение метаданных документов
     """
 
     def __init__(
@@ -69,7 +72,7 @@ class DocumentIndexer:
                 'updated_at': None,
                 'total_documents': 0,
                 'total_chunks': 0,
-                'version': '1.0'
+                'version': '2.0'  # Версия с расширенными метаданными
             },
             'documents': {},  # file_path -> document metadata
             'chunks': [],     # список всех чанков с эмбеддингами
@@ -211,7 +214,7 @@ class DocumentIndexer:
                 'chunks_created': 0
             }
 
-        # Получаем метаданные файла
+        # Получаем базовые метаданные файла
         try:
             metadata = get_file_metadata(file_path)
         except Exception as e:
@@ -222,9 +225,12 @@ class DocumentIndexer:
                 'file_type': os.path.splitext(file_path)[1].lstrip('.')
             }
 
+        # Обогащаем метаданные
+        enriched_metadata = self._enrich_file_metadata(file_path, content, metadata)
+
         # Разбиваем на чанки
         logger.info(f"Chunking file: {file_path}")
-        chunks = self.chunker.chunk_text(content, metadata)
+        chunks = self.chunker.chunk_text(content, enriched_metadata)
 
         if not chunks:
             logger.warning(f"No chunks created for {file_path}")
@@ -256,25 +262,28 @@ class DocumentIndexer:
         # Удаляем старые чанки этого файла из индекса
         self._remove_file_from_index(file_path)
 
-        # Добавляем новые чанки в индекс
+        # Обогащаем метаданные чанков
+        enriched_chunks = []
         chunks_added = 0
+        
         for chunk, embedding in zip(chunks, embeddings):
             if embedding:  # Проверяем что эмбеддинг не пустой
-                chunk['embedding'] = embedding
-                self.index['chunks'].append(chunk)
+                # Обогащаем метаданные чанка
+                enriched_chunk = self._enrich_chunk_metadata(
+                    chunk, enriched_metadata, file_path
+                )
+                enriched_chunk['embedding'] = embedding
+                enriched_chunks.append(enriched_chunk)
                 chunks_added += 1
             else:
                 logger.warning(f"Empty embedding for chunk {chunk['chunk_id']}, skipping")
 
-        # Сохраняем метаданные документа
-        self.index['documents'][file_path] = {
-            'file_path': file_path,
-            'file_name': os.path.basename(file_path),
-            'file_type': metadata.get('file_type', 'unknown'),
-            'indexed_at': datetime.now().isoformat(),
-            'chunks_count': chunks_added,
-            'file_size': metadata.get('file_size', 0)
-        }
+        self.index['chunks'].extend(enriched_chunks)
+
+        # Сохраняем расширенные метаданные документа
+        self.index['documents'][file_path] = self._create_enriched_document_metadata(
+            file_path, enriched_metadata, chunks_added, enriched_chunks
+        )
 
         # Сохраняем хэш файла
         self.index['file_hashes'][file_path] = current_hash
@@ -286,6 +295,342 @@ class DocumentIndexer:
             'chunks_created': chunks_added,
             'file_hash': current_hash
         }
+
+    def _enrich_file_metadata(
+        self,
+        file_path: str,
+        content: str,
+        base_metadata: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Обогащает метаданные файла дополнительной информацией.
+
+        Args:
+            file_path: Путь к файлу
+            content: Содержимое файла
+            base_metadata: Базовые метаданные
+
+        Returns:
+            Обогащенные метаданные
+        """
+        enriched = base_metadata.copy()
+        file_ext = os.path.splitext(file_path)[1].lower()
+
+        # Определяем язык программирования
+        enriched['language'] = self._detect_language(file_ext, content)
+        
+        # Анализ для Python файлов
+        if file_ext == '.py':
+            enriched.update(self._analyze_python_file(content))
+        
+        # Анализ для Markdown файлов
+        elif file_ext in ['.md', '.markdown']:
+            enriched.update(self._analyze_markdown_file(content))
+        
+        # Общие метрики
+        enriched.update(self._calculate_text_metrics(content))
+        
+        # Добавляем информацию о сложности
+        enriched['complexity'] = self._calculate_complexity(content, enriched['language'])
+        
+        return enriched
+
+    def _enrich_chunk_metadata(
+        self,
+        chunk: Dict[str, Any],
+        file_metadata: Dict[str, Any],
+        file_path: str
+    ) -> Dict[str, Any]:
+        """
+        Обогащает метаданные чанка.
+
+        Args:
+            chunk: Исходный чанк
+            file_metadata: Метаданные файла
+            file_path: Путь к файлу
+
+        Returns:
+            Обогащенный чанк
+        """
+        enriched_chunk = chunk.copy()
+        
+        # Добавляем метаданные из файла
+        enriched_chunk['file_language'] = file_metadata.get('language', 'unknown')
+        enriched_chunk['file_type'] = file_metadata.get('file_type', 'unknown')
+        enriched_chunk['file_size'] = file_metadata.get('file_size', 0)
+        enriched_chunk['file_complexity'] = file_metadata.get('complexity', 0)
+        
+        # Анализируем содержимое чанка
+        chunk_content = chunk.get('text', '')
+        
+        # Поиск функций в чанке (для Python)
+        if file_metadata.get('language') == 'python':
+            functions = self._extract_functions_from_text(chunk_content)
+            enriched_chunk['functions'] = functions
+        
+        # Поиск классов в чанке
+        if file_metadata.get('language') == 'python':
+            classes = self._extract_classes_from_text(chunk_content)
+            enriched_chunk['classes'] = classes
+        
+        # Поиск импортов
+        imports = self._extract_imports_from_text(chunk_content, file_metadata.get('language'))
+        enriched_chunk['imports'] = imports
+        
+        # Дополнительные метрики чанка
+        enriched_chunk.update(self._calculate_chunk_metrics(chunk_content))
+        
+        # Добавляем временную метку
+        enriched_chunk['indexed_at'] = datetime.now().isoformat()
+        
+        return enriched_chunk
+
+    def _create_enriched_document_metadata(
+        self,
+        file_path: str,
+        metadata: Dict[str, Any],
+        chunks_count: int,
+        chunks: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Создает обогащенные метаданные документа.
+
+        Args:
+            file_path: Путь к файлу
+            metadata: Метаданные файла
+            chunks_count: Количество чанков
+            chunks: Список чанков
+
+        Returns:
+            Обогащенные метаданные документа
+        """
+        # Собираем все уникальные функции и классы из чанков
+        all_functions = set()
+        all_classes = set()
+        all_imports = set()
+        
+        for chunk in chunks:
+            all_functions.update(chunk.get('functions', []))
+            all_classes.update(chunk.get('classes', []))
+            all_imports.update(chunk.get('imports', []))
+        
+        enriched_metadata = {
+            'file_path': file_path,
+            'file_name': os.path.basename(file_path),
+            'file_type': metadata.get('file_type', 'unknown'),
+            'language': metadata.get('language', 'unknown'),
+            'indexed_at': datetime.now().isoformat(),
+            'chunks_count': chunks_count,
+            'file_size': metadata.get('file_size', 0),
+            'lines_count': metadata.get('lines', 0),
+            'functions': list(all_functions),
+            'classes': list(all_classes),
+            'imports': list(all_imports),
+            'complexity': metadata.get('complexity', 0),
+            'author': metadata.get('author', 'unknown'),
+            'last_modified': metadata.get('last_modified', 'unknown'),
+            'docstrings': metadata.get('docstrings', []),
+            'avg_chunk_length': metadata.get('avg_chunk_length', 0)
+        }
+        
+        return enriched_metadata
+
+    def _detect_language(self, file_ext: str, content: str) -> str:
+        """Определяет язык программирования/формат файла."""
+        extension_map = {
+            '.py': 'python',
+            '.js': 'javascript',
+            '.ts': 'typescript',
+            '.jsx': 'react',
+            '.tsx': 'react',
+            '.java': 'java',
+            '.cpp': 'cpp',
+            '.c': 'c',
+            '.h': 'c',
+            '.cs': 'csharp',
+            '.go': 'go',
+            '.rb': 'ruby',
+            '.php': 'php',
+            '.swift': 'swift',
+            '.kt': 'kotlin',
+            '.rs': 'rust',
+            '.md': 'markdown',
+            '.txt': 'text',
+            '.json': 'json',
+            '.yaml': 'yaml',
+            '.yml': 'yaml',
+            '.xml': 'xml',
+            '.html': 'html',
+            '.css': 'css',
+            '.sql': 'sql'
+        }
+        
+        return extension_map.get(file_ext, 'unknown')
+
+    def _analyze_python_file(self, content: str) -> Dict[str, Any]:
+        """Анализирует Python файл."""
+        try:
+            tree = ast.parse(content)
+            
+            functions = []
+            classes = []
+            imports = []
+            
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef):
+                    functions.append(node.name)
+                elif isinstance(node, ast.ClassDef):
+                    classes.append(node.name)
+                elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                    if isinstance(node, ast.Import):
+                        for alias in node.names:
+                            imports.append(alias.name)
+                    else:
+                        imports.append(f"from {node.module}")
+            
+            return {
+                'functions': functions,
+                'classes': classes,
+                'imports': imports,
+                'docstrings': self._extract_docstrings(tree)
+            }
+            
+        except SyntaxError:
+            logger.warning("Cannot parse Python file for analysis")
+            return {'functions': [], 'classes': [], 'imports': [], 'docstrings': []}
+
+    def _analyze_markdown_file(self, content: str) -> Dict[str, Any]:
+        """Анализирует Markdown файл."""
+        import re
+        
+        # Извлекаем заголовки
+        headers = re.findall(r'^#{1,6}\s+(.+)$', content, re.MULTILINE)
+        
+        # Извлекаем кодовые блоки
+        code_blocks = re.findall(r'```(\w+)?\n(.*?)\n```', content, re.DOTALL)
+        
+        # Извлекаем ссылки
+        links = re.findall(r'\[([^\]]+)\]\(([^)]+)\)', content)
+        
+        return {
+            'headers': headers,
+            'code_blocks': [{'language': lang or 'text', 'content': code} for lang, code in code_blocks],
+            'links': links,
+            'sections_count': len(headers)
+        }
+
+    def _calculate_text_metrics(self, content: str) -> Dict[str, Any]:
+        """Вычисляет текстовые метрики."""
+        lines = content.split('\n')
+        words = content.split()
+        
+        return {
+            'lines': len(lines),
+            'words': len(words),
+            'characters': len(content),
+            'avg_line_length': sum(len(line) for line in lines) / len(lines) if lines else 0,
+            'avg_word_length': sum(len(word) for word in words) / len(words) if words else 0
+        }
+
+    def _calculate_complexity(self, content: str, language: str) -> int:
+        """Вычисляет цикломатическую сложность."""
+        if language == 'python':
+            return self._calculate_python_complexity(content)
+        else:
+            # Упрощенная оценка для других языков
+            complexity_indicators = ['if', 'else', 'elif', 'for', 'while', 'try', 'except', 'case', 'switch']
+            complexity = 1  # Базовая сложность
+            
+            for indicator in complexity_indicators:
+                complexity += content.count(indicator)
+            
+            return complexity
+
+    def _calculate_python_complexity(self, content: str) -> int:
+        """Вычисляет цикломатическую сложность для Python."""
+        try:
+            tree = ast.parse(content)
+            complexity = 1  # Базовая сложность
+            
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.If, ast.While, ast.For, ast.With)):
+                    complexity += 1
+                elif isinstance(node, ast.ExceptHandler):
+                    complexity += 1
+                elif isinstance(node, ast.BoolOp):
+                    complexity += len(node.values) - 1
+            
+            return complexity
+            
+        except SyntaxError:
+            # Fallback - простой подсчет
+            indicators = ['if', 'elif', 'for', 'while', 'except', 'with']
+            complexity = 1
+            for indicator in indicators:
+                complexity += content.count(indicator)
+            return complexity
+
+    def _extract_functions_from_text(self, text: str) -> List[str]:
+        """Извлекает имена функций из текста."""
+        import re
+        pattern = r'\bdef\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\('
+        return re.findall(pattern, text)
+
+    def _extract_classes_from_text(self, text: str) -> List[str]:
+        """Извлекает имена классов из текста."""
+        import re
+        pattern = r'\bclass\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[\(:]'
+        return re.findall(pattern, text)
+
+    def _extract_imports_from_text(self, text: str, language: str) -> List[str]:
+        """Извлекает импорты из текста."""
+        imports = []
+        
+        if language == 'python':
+            import re
+            # import module
+            imports.extend(re.findall(r'\bimport\s+([a-zA-Z_][a-zA-Z0-9_.]*)', text))
+            # from module import name
+            imports.extend(re.findall(r'\bfrom\s+([a-zA-Z_][a-zA-Z0-9_.]*)\s+import', text))
+        
+        return list(set(imports))  # Убираем дубликаты
+
+    def _extract_docstrings(self, tree: ast.AST) -> List[str]:
+        """Извлекает docstrings из AST."""
+        docstrings = []
+        
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.Module)):
+                docstring = ast.get_docstring(node)
+                if docstring:
+                    docstrings.append(docstring)
+        
+        return docstrings
+
+    def _calculate_chunk_metrics(self, content: str) -> Dict[str, Any]:
+        """Вычисляет метрики чанка."""
+        words = content.split()
+        sentences = content.split('.')
+        
+        return {
+            'word_count': len(words),
+            'sentence_count': len([s for s in sentences if s.strip()]),
+            'avg_word_length': sum(len(word) for word in words) / len(words) if words else 0,
+            'has_code': '```' in content or any(word in content for word in ['def ', 'class ', 'function', 'var ']),
+            'has_numbers': bool(re.search(r'\d+', content)),
+            'has_links': 'http' in content or 'www.' in content,
+            'readability_score': self._calculate_readability(content)
+        }
+
+    def _calculate_readability(self, content: str) -> float:
+        """Вычисляет простую оценку читаемости."""
+        words = content.split()
+        if not words:
+            return 0.0
+        
+        # Упрощенная метрика: отношение коротких слов к общему количеству
+        short_words = sum(1 for word in words if len(word) <= 4)
+        return short_words / len(words)
 
     def update_index(
         self,
@@ -484,11 +829,25 @@ class DocumentIndexer:
 
         # Статистика по типам файлов
         file_types = {}
+        languages = {}
+        
         for doc in self.index['documents'].values():
             file_type = doc.get('file_type', 'unknown')
+            language = doc.get('language', 'unknown')
+            
             file_types[file_type] = file_types.get(file_type, 0) + 1
+            languages[language] = languages.get(language, 0) + 1
 
         stats['file_types'] = file_types
+        stats['languages'] = languages
+        
+        # Дополнительная статистика
+        total_functions = sum(len(doc.get('functions', [])) for doc in self.index['documents'].values())
+        total_classes = sum(len(doc.get('classes', [])) for doc in self.index['documents'].values())
+        
+        stats['total_functions'] = total_functions
+        stats['total_classes'] = total_classes
+        stats['avg_chunks_per_document'] = stats['total_chunks'] / stats['total_documents'] if stats['total_documents'] > 0 else 0
 
         return stats
 
@@ -504,7 +863,7 @@ class DocumentIndexer:
                 'updated_at': None,
                 'total_documents': 0,
                 'total_chunks': 0,
-                'version': '1.0'
+                'version': '2.0'
             },
             'documents': {},
             'chunks': [],

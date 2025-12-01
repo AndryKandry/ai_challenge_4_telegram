@@ -517,3 +517,95 @@ class CodeExampleSearchTool(BaseTool):
             },
             "required": ["topic"]
         }
+
+
+class RAGTools:
+    """
+    Агрегатор RAG инструментов для работы с документацией.
+    
+    Предоставляет единый интерфейс для доступа к всем RAG инструментам:
+    - DocumentSearchTool: семантический поиск
+    - DocumentIndexerTool: индексирование документов  
+    - CodeExampleSearchTool: поиск примеров кода
+    """
+    
+    def __init__(self, rag_manager: RAGManager):
+        """
+        Инициализация RAGTools.
+        
+        Args:
+            rag_manager: Экземпляр RAGManager для работы с индексом
+        """
+        self.rag_manager = rag_manager
+        self.document_search = DocumentSearchTool(rag_manager)
+        self.document_indexer = DocumentIndexerTool(rag_manager)
+        self.code_example_search = CodeExampleSearchTool(rag_manager)
+        
+        # Словарь для быстрого доступа к инструментам
+        self.tools = {
+            "document_search": self.document_search,
+            "document_indexer": self.document_indexer,
+            "code_example_search": self.code_example_search
+        }
+        
+        logger.info("RAGTools инициализирован с 3 инструментами")
+    
+    def get_tool(self, tool_name: str) -> Optional[BaseTool]:
+        """
+        Получить инструмент по имени.
+        
+        Args:
+            tool_name: Имя инструмента
+            
+        Returns:
+            Инструмент или None если не найден
+        """
+        return self.tools.get(tool_name)
+    
+    def list_tools(self) -> List[str]:
+        """
+        Получить список доступных инструментов.
+        
+        Returns:
+            Список имен инструментов
+        """
+        return list(self.tools.keys())
+    
+    async def search_documents(self, query: str, **kwargs) -> List[Dict[str, Any]]:
+        """
+        Упрощенный поиск по документам.
+        
+        Args:
+            query: Поисковый запрос
+            **kwargs: Дополнительные параметры
+            
+        Returns:
+            Результаты поиска
+        """
+        return await self.document_search.execute(query=query, **kwargs)
+    
+    async def index_documents(self, docs_path: str, **kwargs) -> Dict[str, Any]:
+        """
+        Упрощенное индексирование документов.
+        
+        Args:
+            docs_path: Путь к директории с документами
+            **kwargs: Дополнительные параметры
+            
+        Returns:
+            Статистика индексирования
+        """
+        return await self.document_indexer.execute(docs_path=docs_path, **kwargs)
+    
+    async def find_code_examples(self, topic: str, **kwargs) -> List[str]:
+        """
+        Упрощенный поиск примеров кода.
+        
+        Args:
+            topic: Тема для поиска
+            **kwargs: Дополнительные параметры
+            
+        Returns:
+            Список примеров кода
+        """
+        return await self.code_example_search.execute(topic=topic, **kwargs)
