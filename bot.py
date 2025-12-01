@@ -24,9 +24,8 @@ from telegram.ext import (
 # Импорт модулей форматирования и промптов
 from format_manager import FormatManager
 from prompts import SYSTEM_PROMPT_DEFAULT, SYSTEM_PROMPT_JSON, SYSTEM_PROMPT_XML
-from temperature_tester import TemperatureTester
 from database import MemoryManager
-from mcp_client import MCPClient, get_weather_mcp_config
+from mcp_client import MCPClient, get_all_mcp_configs
 
 # Импорт провайдеров LLM и хранилища настроек
 from providers import OpenAIProvider, YandexGPTProvider, DeepSeekProvider
@@ -35,6 +34,15 @@ from storage import UserSettings
 # Импорт RAG модуля
 from src.rag_integration import RAGManager
 from src.integrations.telegram_document_handler import create_telegram_document_handler
+
+# Импорт системы subagents
+from agents import AgentOrchestrator, DocsAgent, GitAgent, HelpCommandAgent
+from tools import ToolManager
+from tools.rag_tools import DocumentSearchTool
+
+# Импорт системы планировщика задач
+from scheduler import TaskScheduler
+from scheduler.builtin_tasks import ReindexDocumentsTask, HealthCheckTask
 
 # Настройка логирования
 logging.basicConfig(
@@ -48,6 +56,85 @@ MAX_MESSAGE_LENGTH = 2000  # Максимальная длина запроса 
 REQUEST_TIMEOUT = 30  # Таймаут запроса к Yandex GPT (секунды)
 YANDEX_GPT_API_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 DEFAULT_MODE = "text"  # Режим вывода по умолчанию
+
+
+class RateLimiter:
+    """
+    Простой rate limiter для контроля частоты запросов пользователей.
+
+    Использует sliding window алгоритм для отслеживания запросов.
+    """
+
+    def __init__(self, max_requests: int = 5, time_window: int = 60):
+        """
+        Инициализация rate limiter.
+
+        Args:
+            max_requests: Максимальное количество запросов в окне времени
+            time_window: Размер окна времени в секундах
+        """
+        self.max_requests = max_requests
+        self.time_window = time_window
+        self.user_requests = {}  # {user_id: [timestamp1, timestamp2, ...]}
+
+    def is_allowed(self, user_id: int) -> bool:
+        """
+        Проверяет, разрешен ли запрос для пользователя.
+
+        Args:
+            user_id: ID пользователя
+
+        Returns:
+            True если запрос разрешен, False если превышен лимит
+        """
+        current_time = time.time()
+
+        # Получаем историю запросов пользователя
+        if user_id not in self.user_requests:
+            self.user_requests[user_id] = []
+
+        # Фильтруем запросы вне текущего окна времени
+        self.user_requests[user_id] = [
+            timestamp for timestamp in self.user_requests[user_id]
+            if current_time - timestamp < self.time_window
+        ]
+
+        # Проверяем лимит
+        if len(self.user_requests[user_id]) >= self.max_requests:
+            return False
+
+        # Добавляем текущий запрос
+        self.user_requests[user_id].append(current_time)
+        return True
+
+    def get_wait_time(self, user_id: int) -> int:
+        """
+        Получает время ожидания до следующего разрешенного запроса.
+
+        Args:
+            user_id: ID пользователя
+
+        Returns:
+            Количество секунд до следующего разрешенного запроса
+        """
+        if user_id not in self.user_requests or not self.user_requests[user_id]:
+            return 0
+
+        current_time = time.time()
+        oldest_request = min(self.user_requests[user_id])
+        wait_time = self.time_window - (current_time - oldest_request)
+
+        return max(0, int(wait_time))
+
+    def reset_user(self, user_id: int) -> None:
+        """
+        Сбрасывает счетчик запросов для пользователя.
+
+        Args:
+            user_id: ID пользователя
+        """
+        if user_id in self.user_requests:
+            del self.user_requests[user_id]
 
 
 class YandexGPTClient:
@@ -255,22 +342,40 @@ class TelegramBot:
         # Менеджер форматов
         self.format_manager = FormatManager()
 
-        # Тестер температуры
-        self.temperature_tester = TemperatureTester(yandex_api_key)
+        # Rate limiter для команды /help (5 запросов в минуту)
+        self.help_rate_limiter = RateLimiter(max_requests=5, time_window=60)
+        logger.info("Rate limiter для /help инициализирован (5 запросов/60 секунд)")
+
 
         # Менеджер долговременной памяти
         self.memory = MemoryManager("agent_memory.db")
         self.memory.create_tables()
         logger.info("Система памяти инициализирована")
 
+        # Инициализация системы subagents
+        self.help_agent = None  # Будет инициализирован ниже
+        try:
+            self._initialize_subagents()
+        except Exception as e:
+            logger.warning(f"Не удалось инициализировать систему subagents: {e}")
+            logger.warning("Команда /help будет недоступна")
+
+        # Инициализация системы планировщика задач
+        self.scheduler = None
+        try:
+            self._initialize_scheduler()
+        except Exception as e:
+            logger.warning(f"Не удалось инициализировать планировщик задач: {e}")
+            logger.warning("Фоновые задачи будут недоступны")
+
         # Регистрация обработчиков команд
         self.application.add_handler(CommandHandler("start", self.start_command))
+        self.application.add_handler(CommandHandler("info", self.info_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("text", self.text_mode_command))
         self.application.add_handler(CommandHandler("json", self.json_mode_command))
         self.application.add_handler(CommandHandler("xml", self.xml_mode_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
-        self.application.add_handler(CommandHandler("test_temperature", self.test_temperature_command))
 
         # Команды управления памятью
         self.application.add_handler(CommandHandler("memory_stats", self.memory_stats_command))
@@ -303,6 +408,10 @@ class TelegramBot:
         from telegram.ext import CallbackQueryHandler
         self.application.add_handler(CallbackQueryHandler(self.handle_callback_query))
 
+        # Регистрация post_init и post_shutdown для управления scheduler
+        self.application.post_init = self._post_init
+        self.application.post_shutdown = self._post_shutdown
+
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик команды /start."""
         user_id = update.effective_user.id
@@ -325,17 +434,16 @@ class TelegramBot:
             "/session_info - Информация о текущей сессии\n"
             "/new_session - Начать новую сессию\n"
             "/end_session - Завершить текущую сессию\n\n"
-            "🧪 Тестирование:\n"
-            "/test_temperature - Сравнить работу LLM при разных температурах\n\n"
-            "🛠 MCP Инструменты (Погода):\n"
-            "/mcp_tools - Показать доступные инструменты для погоды\n\n"
-            "❓ Используй /help для полной справки."
+            "🛠 MCP Инструменты:\n"
+            "/mcp_tools - Показать доступные инструменты (Filesystem, GitHub)\n\n"
+            "🤖 Работа с агентами с помощью команды /help\n"
+            "❓ Используй /info для полной справки."
         )
         await update.message.reply_text(welcome_message)
         logger.info(f"Пользователь {user_id} начал диалог")
 
-    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Обработчик команды /help."""
+    async def info_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик команды /info - справка по боту."""
         help_message = (
             "🤖 Справка по использованию бота:\n\n"
             "• Просто напиши мне любой вопрос или запрос\n"
@@ -344,7 +452,8 @@ class TelegramBot:
             "• Максимальная длина сообщения: 2000 символов\n\n"
             "📌 Основные команды:\n"
             "/start - Начать работу с ботом\n"
-            "/help - Показать эту справку\n"
+            "/info - Показать эту справку\n"
+            "/help <вопрос> - Получить помощь по проекту (документация, git)\n"
             "/status - Проверить текущий режим вывода\n\n"
             "🤖 Выбор LLM модели:\n"
             "/openai - OpenAI GPT (gpt-3.5-turbo)\n"
@@ -378,7 +487,9 @@ class TelegramBot:
             "🛠 MCP (Model Context Protocol):\n"
             "/mcp_tools - Получить список доступных MCP инструментов\n\n"
             "MCP позволяет боту подключаться к внешним инструментам.\n"
-            "Сейчас доступен Weather MCP сервер для получения погоды из US National Weather Service.\n\n"
+            "Доступные серверы:\n"
+            "• Filesystem - работа с файловой системой (чтение, запись, навигация)\n"
+            "• GitHub - получение информации о пользователях и репозиториях\n\n"
             "💡 Как работают сессии:\n"
             "• Сессия автоматически создается при первом сообщении\n"
             "• Бот помнит последние 10 сообщений из текущей сессии\n"
@@ -389,6 +500,133 @@ class TelegramBot:
         )
         await update.message.reply_text(help_message)
         logger.info(f"Пользователь {update.effective_user.id} запросил справку")
+
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Обработчик команды /help - интеллектуальная помощь по проекту.
+
+        Использует систему subagents для ответов на вопросы о документации
+        и состоянии репозитория.
+
+        Использование:
+            /help <вопрос> - задать вопрос
+            /help - показать примеры использования
+        """
+        user_id = update.effective_user.id
+
+        # Проверка rate limit (только для запросов с вопросами, не для /help без аргументов)
+        if context.args and not self.help_rate_limiter.is_allowed(user_id):
+            wait_time = self.help_rate_limiter.get_wait_time(user_id)
+            rate_limit_message = (
+                "⏱️ **Превышен лимит запросов**\n\n"
+                f"Вы превысили лимит запросов к команде /help.\n"
+                f"Пожалуйста, подождите {wait_time} секунд перед следующим запросом.\n\n"
+                f"_Лимит: {self.help_rate_limiter.max_requests} запросов в {self.help_rate_limiter.time_window} секунд_"
+            )
+            await update.message.reply_text(rate_limit_message)
+            logger.warning(f"Rate limit exceeded for user {user_id}, wait time: {wait_time}s")
+            return
+
+        # Получаем вопрос из аргументов команды
+        if context.args:
+            query = " ".join(context.args)
+        else:
+            # Показываем примеры использования
+            examples_message = (
+                "🤖 **Интеллектуальная помощь по проекту**\n\n"
+                "Используйте команду `/help` с вопросом для получения информации:\n\n"
+                "**Примеры:**\n"
+                "• `/help как использовать RAG`\n"
+                "• `/help как настроить бота`\n"
+                "• `/help покажи примеры кода для агентов`\n"
+                "• `/help покажи текущую ветку`\n"
+                "• `/help покажи последние коммиты`\n"  
+                "• `/help какой статус репозитория`\n"
+                "• `/help покажи измененные файлы`\n\n"
+                "**Я могу помочь с:**\n"
+                "📚 Документацией проекта\n"
+                "💻 Примерами кода\n"
+                "🔧 Статусом репозитория\n"
+                "📝 Историей коммитов\n"
+                "🌿 Информацией о ветках\n\n"
+                "Просто задайте вопрос после команды!"
+            )
+            await update.message.reply_text(examples_message)
+            return
+
+        logger.info(f"Пользователь {user_id} запросил помощь: '{query}'")
+
+        # Проверяем доступность HelpCommandAgent
+        if not hasattr(self, 'help_agent') or self.help_agent is None:
+            error_message = (
+                "⚠️ Система интеллектуальной помощи недоступна.\n\n"
+                "Возможные причины:\n"
+                "• Система subagents не инициализирована\n"
+                "• Отсутствуют необходимые компоненты\n\n"
+                "Используйте `/info` для получения справки по боту."
+            )
+            await update.message.reply_text(error_message)
+            logger.error(f"HelpCommandAgent недоступен для пользователя {user_id}")
+            return
+
+        # Отправка индикатора набора текста
+        await update.message.chat.send_action("typing")
+
+        try:
+            # Формируем задачу для HelpCommandAgent
+            task = {
+                "action": "answer_question",
+                "params": {
+                    "query": query
+                },
+                "context": {
+                    "user_id": user_id,
+                    "chat_id": update.effective_chat.id
+                }
+            }
+
+            # Выполняем задачу через HelpCommandAgent
+            result = await self.help_agent.execute(task)
+
+            # Получаем ответ
+            answer = result.get("answer", "Не удалось получить ответ.")
+            sources = result.get("sources", [])
+            agents_used = result.get("agents_used", [])
+
+            # Форматируем ответ
+            response_parts = [answer]
+
+            # Добавляем информацию об использованных агентах (если включено в конфиге)
+            if agents_used and len(agents_used) > 0:
+                agents_str = ", ".join(agents_used)
+                response_parts.append(f"\n\n_Использованы агенты: {agents_str}_")
+
+            response = "\n".join(response_parts)
+
+            # Отправляем ответ пользователю
+            # Telegram ограничивает длину сообщения до 4096 символов
+            if len(response) > 4000:
+                # Разбиваем на части
+                parts = self._split_long_message(response, 4000)
+                for part in parts:
+                    await update.message.reply_text(part)
+                    await asyncio.sleep(0.5)
+            else:
+                await update.message.reply_text(response)
+
+            logger.info(f"Ответ отправлен пользователю {user_id}")
+
+        except Exception as e:
+            logger.error(f"Ошибка при обработке /help для пользователя {user_id}: {e}", exc_info=True)
+            error_message = (
+                "❌ Произошла ошибка при обработке вашего вопроса.\n\n"
+                f"Ошибка: {str(e)}\n\n"
+                "Попробуйте:\n"
+                "• Переформулировать вопрос\n"
+                "• Использовать `/info` для справки\n"
+                "• Обратиться к администратору"
+            )
+            await update.message.reply_text(error_message)
 
     async def text_mode_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик команды /text - переключение на текстовый режим."""
@@ -1052,9 +1290,10 @@ class TelegramBot:
 
     async def mcp_tools_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
-        Обработчик команды /mcp_tools - получение списка доступных MCP инструментов.
+        Обработчик команды /mcp_tools - получение списка всех доступных MCP инструментов.
 
-        Подключается к локальному Weather MCP серверу и выводит список всех доступных инструментов.
+        Подключается ко всем доступным MCP серверам и выводит список инструментов
+        только от успешно подключенных серверов.
         """
         user_id = update.effective_user.id
         logger.info(f"Пользователь {user_id} запросил список MCP инструментов")
@@ -1062,65 +1301,111 @@ class TelegramBot:
         # Отправка сообщения о начале загрузки
         loading_message = await update.message.reply_text(
             "🔄 Получаю список доступных MCP инструментов...\n"
-            "Подключение к Weather MCP серверу..."
+            "Проверяю доступные серверы..."
         )
 
         try:
-            # Получение конфигурации Weather MCP
-            mcp_config = get_weather_mcp_config()
+            # Получение конфигураций всех MCP серверов
+            mcp_configs = get_all_mcp_configs()
 
-            # Создание MCP клиента
-            mcp_client = MCPClient(mcp_config)
-
-            # Подключение к серверу
-            connected = await mcp_client.connect()
-
-            if not connected:
+            if not mcp_configs:
                 error_message = (
-                    "❌ Ошибка подключения к MCP-серверу\n\n"
-                    "Не удалось установить соединение с Weather MCP сервером.\n\n"
-                    "Возможные причины:\n"
-                    "• Файл mcp_server/weather.py не найден\n"
-                    "• Ошибка запуска Python процесса сервера\n"
-                    "• Отсутствуют необходимые зависимости (mcp, httpx)\n\n"
-                    "Проверьте настройки и попробуйте снова."
+                    "❌ Нет доступных MCP серверов\n\n"
+                    "Не найдено ни одного MCP сервера для подключения.\n"
+                    "Проверьте наличие файлов серверов в директории mcp_server/"
                 )
                 await loading_message.edit_text(error_message)
                 return
 
-            # Получение списка инструментов
-            tools = await mcp_client.list_tools()
+            # Словарь для хранения результатов: {server_name: [tools]}
+            server_tools = {}
+            failed_servers = []
 
-            # Закрытие соединения
-            await mcp_client.disconnect()
+            # Пытаемся подключиться к каждому серверу
+            for config in mcp_configs:
+                server_name = config.get("name", "unknown")
+                logger.info(f"Попытка подключения к MCP серверу: {server_name}")
 
-            if not tools:
-                message = (
-                    "📭 Список инструментов пуст\n\n"
-                    "MCP-сервер не предоставил ни одного инструмента.\n"
-                    "Проверьте конфигурацию сервера."
+                try:
+                    # Создание MCP клиента
+                    mcp_client = MCPClient(config)
+
+                    # Подключение к серверу с таймаутом
+                    connected = await asyncio.wait_for(
+                        mcp_client.connect(),
+                        timeout=10.0
+                    )
+
+                    if not connected:
+                        logger.warning(f"Не удалось подключиться к серверу {server_name}")
+                        failed_servers.append(server_name)
+                        continue
+
+                    # Получение списка инструментов
+                    tools = await mcp_client.list_tools()
+
+                    # Закрытие соединения
+                    await mcp_client.disconnect()
+
+                    if tools:
+                        server_tools[server_name] = tools
+                        logger.info(f"Получено {len(tools)} инструментов от сервера {server_name}")
+                    else:
+                        logger.warning(f"Сервер {server_name} не вернул инструменты")
+                        failed_servers.append(server_name)
+
+                except asyncio.TimeoutError:
+                    logger.warning(f"Таймаут подключения к серверу {server_name}")
+                    failed_servers.append(server_name)
+                except Exception as e:
+                    logger.error(f"Ошибка при работе с сервером {server_name}: {e}")
+                    failed_servers.append(server_name)
+
+            # Проверка, есть ли хотя бы один успешный сервер
+            if not server_tools:
+                error_message = (
+                    "❌ Не удалось подключиться ни к одному MCP серверу\n\n"
+                    f"Проверенные серверы: {', '.join(failed_servers)}\n\n"
+                    "Возможные причины:\n"
+                    "• Серверы не запущены\n"
+                    "• Ошибка в конфигурации\n"
+                    "• Отсутствуют зависимости (fastmcp, httpx)\n\n"
+                    "Проверьте логи для подробностей."
                 )
-                await loading_message.edit_text(message)
+                await loading_message.edit_text(error_message)
                 return
 
-            # Форматирование ответа
+            # Формирование ответа
             response = "🛠 <b>Доступные MCP инструменты:</b>\n\n"
 
-            for idx, tool in enumerate(tools, 1):
-                response += f"{idx}. <b>{tool['name']}</b>\n"
-                response += f"   📝 {tool['description']}\n"
+            total_tools = 0
+            for server_name, tools in server_tools.items():
+                response += f"📦 <b>Сервер: {server_name}</b>\n"
+                response += f"Количество инструментов: {len(tools)}\n\n"
 
-                # Извлечение параметров из inputSchema
-                schema = tool.get('inputSchema', {})
-                if isinstance(schema, dict):
-                    properties = schema.get('properties', {})
-                    if properties:
-                        params = list(properties.keys())
-                        response += f"   ⚙️ Параметры: {', '.join(params)}\n"
+                for idx, tool in enumerate(tools, 1):
+                    response += f"  {idx}. <b>{tool['name']}</b>\n"
+                    response += f"     📝 {tool['description']}\n"
 
-                response += "\n"
+                    # Извлечение параметров из inputSchema
+                    schema = tool.get('inputSchema', {})
+                    if isinstance(schema, dict):
+                        properties = schema.get('properties', {})
+                        if properties:
+                            params = list(properties.keys())
+                            response += f"     ⚙️ Параметры: {', '.join(params)}\n"
 
-            response += f"📊 Всего инструментов: {len(tools)}"
+                    response += "\n"
+
+                total_tools += len(tools)
+
+            # Добавление информации о недоступных серверах
+            if failed_servers:
+                response += f"⚠️ <b>Недоступные серверы:</b> {', '.join(failed_servers)}\n\n"
+
+            response += f"📊 <b>Итого:</b>\n"
+            response += f"✅ Доступных серверов: {len(server_tools)}\n"
+            response += f"🔧 Всего инструментов: {total_tools}"
 
             # Проверка длины сообщения (Telegram ограничение)
             if len(response) > 4096:
@@ -1134,20 +1419,26 @@ class TelegramBot:
                 # Отправка ответа пользователю
                 await loading_message.edit_text(response, parse_mode="HTML")
 
-            logger.info(f"Отправлен список из {len(tools)} MCP инструментов пользователю {user_id}")
+            logger.info(
+                f"Отправлен список инструментов пользователю {user_id}: "
+                f"{len(server_tools)} серверов, {total_tools} инструментов"
+            )
 
         except ImportError as e:
             logger.error(f"Ошибка импорта MCP библиотеки: {e}")
             error_message = (
                 "❌ MCP библиотека не установлена\n\n"
                 "Для использования MCP функций необходимо установить библиотеку:\n"
-                "<code>pip install mcp</code>\n\n"
+                "<code>pip install mcp fastmcp</code>\n\n"
                 "После установки перезапустите бота."
             )
             await loading_message.edit_text(error_message, parse_mode="HTML")
 
         except Exception as e:
-            logger.error(f"Ошибка при получении списка MCP инструментов для пользователя {user_id}: {e}", exc_info=True)
+            logger.error(
+                f"Ошибка при получении списка MCP инструментов для пользователя {user_id}: {e}",
+                exc_info=True
+            )
             error_message = (
                 f"❌ Ошибка при получении списка инструментов\n\n"
                 f"Произошла непредвиденная ошибка:\n"
@@ -1341,6 +1632,157 @@ class TelegramBot:
             logger.error(f"Ошибка обработки callback запроса: {e}")
             await query.message.reply_text("❌ Ошибка обработки запроса")
 
+    def _initialize_subagents(self) -> None:
+        """
+        Инициализация системы subagents (Tools, Agents, Orchestrator).
+
+        Создает и настраивает всю архитектуру subagents для команды /help:
+        - Tool Manager и Tools
+        - DocsAgent и GitAgent
+        - AgentOrchestrator
+        - HelpCommandAgent
+        """
+        logger.info("Инициализация системы subagents...")
+
+        # 1. Создаем Tool Manager
+        tool_manager = ToolManager()
+        logger.info("ToolManager создан")
+
+        # 2. Регистрируем Tools
+        if self.rag_manager:
+            # DocumentSearchTool для поиска по документации
+            doc_search_tool = DocumentSearchTool(self.rag_manager)
+            tool_manager.register_tool(doc_search_tool)
+            logger.info("DocumentSearchTool зарегистрирован")
+        else:
+            logger.warning("RAG Manager недоступен, DocumentSearchTool не будет зарегистрирован")
+
+        # Здесь можно добавить другие Tools (MCPTool для GitHub и т.д.)
+        # Пока DocumentSearchTool достаточно для базовой функциональности
+
+        # 3. Создаем AgentOrchestrator
+        orchestrator = AgentOrchestrator(tool_manager=tool_manager)
+        logger.info("AgentOrchestrator создан")
+
+        # 4. Создаем и регистрируем DocsAgent
+        try:
+            docs_agent = DocsAgent(
+                tool_manager=tool_manager,
+                name="docs_agent",
+                enabled=True
+            )
+            orchestrator.register_agent(docs_agent)
+            logger.info("DocsAgent создан и зарегистрирован")
+        except Exception as e:
+            logger.error(f"Ошибка создания DocsAgent: {e}")
+            raise
+
+        # 5. Создаем и регистрируем GitAgent
+        try:
+            git_agent = GitAgent(
+                tool_manager=tool_manager,
+                repo_path=".",
+                name="git_agent",
+                enabled=True
+            )
+            orchestrator.register_agent(git_agent)
+            logger.info("GitAgent создан и зарегистрирован")
+        except Exception as e:
+            logger.warning(f"Не удалось создать GitAgent: {e}")
+            # GitAgent не критичен, продолжаем без него
+
+        # 6. Создаем HelpCommandAgent
+        try:
+            self.help_agent = HelpCommandAgent(
+                orchestrator=orchestrator,
+                name="help_command_agent",
+                enabled=True
+            )
+            logger.info("HelpCommandAgent создан и готов к работе")
+        except Exception as e:
+            logger.error(f"Ошибка создания HelpCommandAgent: {e}")
+            raise
+
+        logger.info("Система subagents успешно инициализирована")
+
+    def _initialize_scheduler(self) -> None:
+        """
+        Инициализация планировщика фоновых задач.
+
+        Создает TaskScheduler и регистрирует встроенные задачи:
+        - ReindexDocumentsTask - переиндексация документов каждые 24 часа
+        - HealthCheckTask - проверка здоровья системы каждые 5 минут
+        """
+        logger.info("Инициализация планировщика задач...")
+
+        # Создаем планировщик с интервалом проверки 60 секунд
+        self.scheduler = TaskScheduler(check_interval=60)
+        logger.info("TaskScheduler создан")
+
+        # Регистрируем задачу переиндексации документов
+        if self.rag_manager:
+            from datetime import timedelta
+
+            reindex_task = ReindexDocumentsTask(
+                rag_manager=self.rag_manager,
+                docs_path="docs/",
+                interval=timedelta(hours=24)
+            )
+            self.scheduler.register_task(reindex_task)
+            logger.info("ReindexDocumentsTask зарегистрирована (интервал: 24 часа)")
+        else:
+            logger.warning("RAG Manager недоступен, ReindexDocumentsTask не будет зарегистрирована")
+
+        # Регистрируем задачу проверки здоровья системы
+        try:
+            from datetime import timedelta
+
+            health_check_task = HealthCheckTask(
+                interval=timedelta(minutes=5)
+            )
+            self.scheduler.register_task(health_check_task)
+            logger.info("HealthCheckTask зарегистрирована (интервал: 5 минут)")
+        except Exception as e:
+            logger.warning(f"Не удалось зарегистрировать HealthCheckTask: {e}")
+
+        logger.info("Планировщик задач успешно инициализирован")
+
+    async def _post_init(self, application: Application) -> None:
+        """
+        Callback, вызываемый после инициализации приложения.
+        Запускает планировщик задач в фоновом режиме.
+
+        Args:
+            application: Экземпляр Application
+        """
+        if self.scheduler:
+            try:
+                logger.info("Запуск планировщика задач в фоновом режиме...")
+                await self.scheduler.start()
+                logger.info("Планировщик задач успешно запущен")
+            except Exception as e:
+                logger.error(f"Ошибка при запуске планировщика задач: {e}", exc_info=True)
+        else:
+            logger.warning("Планировщик задач не инициализирован, пропускаем запуск")
+
+    async def _post_shutdown(self, application: Application) -> None:
+        """
+        Callback, вызываемый при завершении работы приложения.
+        Останавливает планировщик задач.
+
+        Args:
+            application: Экземпляр Application
+        """
+        if self.scheduler:
+            try:
+                logger.info("Остановка планировщика задач...")
+                await self.scheduler.stop()
+                logger.info("Планировщик задач успешно остановлен")
+            except Exception as e:
+                logger.error(f"Ошибка при остановке планировщика задач: {e}", exc_info=True)
+        else:
+            logger.debug("Планировщик задач не был запущен")
+
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик ошибок бота."""
         logger.error(f"Произошла ошибка: {context.error}", exc_info=True)
@@ -1386,6 +1828,9 @@ def main() -> None:
         logger.error(f"Ошибка при запуске бота: {e}", exc_info=True)
         sys.exit(1)
 
+
+# Создаем глобальный экземпляр приложения для импорта
+app = None
 
 if __name__ == "__main__":
     main()

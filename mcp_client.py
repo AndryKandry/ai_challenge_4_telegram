@@ -329,55 +329,75 @@ def load_mcp_config(config_path: str = "config/mcp_config.json") -> Dict[str, An
         return {}
 
 
-def get_weather_mcp_config() -> Dict[str, Any]:
+def get_filesystem_mcp_config() -> Dict[str, Any]:
     """
-    Получение конфигурации для локального Weather MCP сервера.
+    Получение конфигурации для Filesystem MCP сервера.
 
-    Weather MCP сервер предоставляет инструменты для получения погодной информации
-    из US National Weather Service API.
-
-    ВАЖНО: Из-за бага в MCP Python SDK (https://github.com/modelcontextprotocol/python-sdk/issues/862),
-    stdio транспорт зависает при инициализации. Используется HTTP/SSE транспорт.
-
-    Для работы нужно запустить сервер отдельно:
-        python mcp_server/weather.py
+    Filesystem MCP сервер предоставляет инструменты для работы с файловой системой:
+    - list_directory: просмотр содержимого директории
+    - read_file: чтение файлов
+    - write_file: создание файлов
+    - edit_file: редактирование файлов
+    - get_file_info: получение информации о файле
 
     Returns:
-        Словарь с конфигурацией для подключения к Weather MCP серверу
+        Словарь с конфигурацией для подключения к Filesystem MCP серверу
     """
+    from pathlib import Path
+
+    project_root = Path(__file__).parent
+
+    # Используем SSE транспорт (сервер запускается на порту 8003)
     return {
-        "type": "http",
-        "url": "http://localhost:8000/sse",
+        "name": "filesystem",
+        "type": "sse",
+        "url": "http://127.0.0.1:8003/sse",
         "headers": {}
     }
 
 
-def get_weather_stdio_mcp_config() -> Dict[str, Any]:
+def get_github_mcp_config() -> Dict[str, Any]:
     """
-    Получение конфигурации для Weather MCP сервера через stdio транспорт.
+    Получение конфигурации для GitHub MCP сервера.
 
-    ВНИМАНИЕ: stdio транспорт имеет критический баг в MCP Python SDK 1.21.2,
-    который вызывает зависание при инициализации на macOS, Windows и Linux.
-    См. https://github.com/modelcontextprotocol/python-sdk/issues/862
-
-    Эта функция сохранена для обратной совместимости и может быть использована
-    когда баг будет исправлен в будущих версиях SDK.
+    GitHub MCP сервер предоставляет инструменты для работы с GitHub API:
+    - get_user_repositories: список репозиториев пользователя
+    - get_user_info: информация о пользователе
+    - get_repository_commits: коммиты репозитория
 
     Returns:
-        Словарь с конфигурацией для подключения к Weather MCP серверу через stdio
+        Словарь с конфигурацией для подключения к GitHub MCP серверу
     """
-    import sys
     from pathlib import Path
 
     project_root = Path(__file__).parent
-    weather_server_path = project_root / "mcp_server" / "weather.py"
 
-    if not weather_server_path.exists():
-        logger.warning(f"Weather MCP сервер не найден: {weather_server_path}")
-
+    # Используем SSE транспорт (сервер запускается на порту 8001)
     return {
-        "type": "stdio",
-        "command": sys.executable,
-        "args": [str(weather_server_path), "--stdio"],
-        "env": {}
+        "name": "github",
+        "type": "sse", 
+        "url": "http://127.0.0.1:8001/sse",
+        "headers": {}
     }
+
+
+def get_all_mcp_configs() -> list[Dict[str, Any]]:
+    """
+    Получение конфигураций всех доступных MCP серверов.
+
+    Returns:
+        Список словарей с конфигурациями MCP серверов
+    """
+    configs = []
+
+    # Filesystem сервер
+    filesystem_config = get_filesystem_mcp_config()
+    if filesystem_config:
+        configs.append(filesystem_config)
+
+    # GitHub сервер
+    github_config = get_github_mcp_config()
+    if github_config:
+        configs.append(github_config)
+
+    return configs

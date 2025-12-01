@@ -73,7 +73,7 @@ mcp://filesystem/{url_encoded_path}#lines={start}-{end}
 **Примеры:**
 ```
 mcp://filesystem/%2Fpath%2Fto%2Fdocument.md#lines=15-25
-mcp://filesystem/%2Frag_docs%2Fguides%2Fgetting_started.txt#lines=1-10
+mcp://filesystem/%2Fdocs%2Fguides%2Fgetting_started.txt#lines=1-10
 mcp://filesystem/%2Fpath%2Fmy%20document.md#lines=5-15
 ```
 
@@ -121,7 +121,7 @@ relevance = max(similarity_score, rerank_score) * 100
 
 ```markdown
 📚 **Источники:**
-1. 📝 [bot_overview.md](mcp://filesystem/%2Frag_docs%2Fdocumentation%2Fbot_overview.md#lines=1-20) - строки 1-20 (релевантность: 95%)
+1. 📝 [bot_overview.md](mcp://filesystem/%2Fdocs%2Fdocumentation%2Fbot_overview.md#lines=1-20) - строки 1-20 (релевантность: 95%)
 
 💡 *Нажмите на ссылку чтобы открыть документ через MCP*
 ```
@@ -130,9 +130,9 @@ relevance = max(similarity_score, rerank_score) * 100
 
 ```markdown
 📚 **Источники:**
-1. 📝 [getting_started.md](mcp://filesystem/%2Frag_docs%2Fguides%2Fgetting_started.md#lines=15-35) - строки 15-35 (релевантность: 92%)
-2. 📄 [commands.txt](mcp://filesystem/%2Frag_docs%2Freference%2Fcommands.txt#lines=5-15) - строки 5-15 (релевантность: 87%)
-3. 📝 [api_reference.md](mcp://filesystem/%2Frag_docs%2Fdocumentation%2Fapi_reference.md#lines=42-62) - строки 42-62 (релевантность: 81%)
+1. 📝 [getting_started.md](mcp://filesystem/%2Fdocs%2Fguides%2Fgetting_started.md#lines=15-35) - строки 15-35 (релевантность: 92%)
+2. 📄 [commands.txt](mcp://filesystem/%2Fdocs%2Freference%2Fcommands.txt#lines=5-15) - строки 5-15 (релевантность: 87%)
+3. 📝 [api_reference.md](mcp://filesystem/%2Fdocs%2Fdocumentation%2Fapi_reference.md#lines=42-62) - строки 42-62 (релевантность: 81%)
 
 💡 *Нажмите на ссылку чтобы открыть документ через MCP*
 ```

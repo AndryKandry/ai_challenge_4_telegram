@@ -54,16 +54,16 @@ pip install -r requirements.txt
 
 ## Шаг 4: Добавление документов
 
-Создайте структуру директорий в `rag_docs/`:
+Создайте структуру директорий в `docs/`:
 
 ```bash
-mkdir -p rag_docs/{documentation,guides,reference,notes}
+mkdir -p docs/{documentation,guides,reference,notes}
 ```
 
 Добавьте ваши документы:
 
 ```
-rag_docs/
+docs/
 ├── documentation/
 │   ├── project_overview.md
 │   └── architecture.md
@@ -103,17 +103,17 @@ python manage_index.py index
 ```
 
 Процесс индексации:
-1. Сканирует директорию `rag_docs/`
+1. Сканирует директорию `docs/`
 2. Разбивает каждый файл на чанки (~800 токенов)
 3. Генерирует эмбеддинги через Ollama
 4. Сохраняет индекс в `data/embeddings/document_index.json`
 
 Пример вывода:
 ```
-Индексация документов из: rag_docs
+Индексация документов из: docs
 Found 15 files to index
-Indexing [1/15]: rag_docs/documentation/project_overview.md
-Created 5 chunks for rag_docs/documentation/project_overview.md
+Indexing [1/15]: docs/documentation/project_overview.md
+Created 5 chunks for docs/documentation/project_overview.md
 ...
 ✓ Индексация завершена!
 Проиндексировано файлов: 15/15
@@ -156,18 +156,18 @@ python manage_index.py search "как установить проект"
 ```
 Найдено результатов: 3
 
-1. rag_docs/guides/installation.md
+1. docs/guides/installation.md
    Релевантность: 0.892
    ## Установка проекта
 
    Для установки проекта выполните следующие шаги:
    1. Клонируйте репозиторий...
 
-2. rag_docs/documentation/project_overview.md
+2. docs/documentation/project_overview.md
    Релевантность: 0.765
    В разделе установки описан процесс...
 
-3. rag_docs/guides/configuration.md
+3. docs/guides/configuration.md
    Релевантность: 0.623
    После установки необходимо настроить...
 ```
@@ -269,7 +269,7 @@ ollama pull bge-m3
 ```
 
 **Решение:**
-1. Убедитесь что файлы есть в `rag_docs/`
+1. Убедитесь что файлы есть в `docs/`
 2. Проверьте расширения файлов (`.md` или `.txt`)
 3. Проверьте что файлы не пустые
 
@@ -285,7 +285,7 @@ UnicodeDecodeError: 'utf-8' codec can't decode...
 
 ## Следующие шаги
 
-1. **Добавьте больше документов** в `rag_docs/`
+1. **Добавьте больше документов** в `docs/`
 2. **Экспериментируйте с поиском** используя разные запросы
 3. **Настройте параметры** в `config/embeddings_config.yaml`:
    - Размер чанков (`chunk_size`)

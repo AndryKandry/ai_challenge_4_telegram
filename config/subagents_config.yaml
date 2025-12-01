@@ -1,0 +1,178 @@
+# Конфигурация системы subagents
+# Настройки для координации работы DocsAgent, GitAgent и HelpCommandAgent
+
+# Общие настройки
+general:
+  enabled: true
+  debug_mode: false
+  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+
+# Настройки DocsAgent - агент для работы с документацией
+docs_agent:
+  enabled: true
+  name: "docs_agent"
+
+  # Пути к документации
+  docs_paths:
+    - "docs/"
+    - "README.md"
+    - "src/"
+
+  # Параметры поиска
+  search:
+    top_k: 5                    # Количество результатов по умолчанию
+    min_similarity: 0.5         # Минимальная релевантность (0.0-1.0)
+    include_code_examples: true # Включать примеры кода
+
+  # Параметры индексации
+  indexing:
+    file_extensions:
+      - ".md"
+      - ".txt"
+      - ".py"
+      - ".rst"
+    exclude_patterns:
+      - "__pycache__"
+      - ".git"
+      - "*.pyc"
+      - ".venv"
+
+  # Необходимые Tools
+  required_tools:
+    - "document_search"
+
+  # Альтернативные Tools
+  preferred_tools:
+    search:
+      - "document_search"
+    code_search:
+      - "code_example_search"
+
+# Настройки GitAgent - агент для работы с репозиторием
+git_agent:
+  enabled: true
+  name: "git_agent"
+
+  # Путь к репозиторию
+  repo_path: "."
+
+  # Параметры по умолчанию
+  defaults:
+    commits_limit: 10           # Количество коммитов
+    pr_limit: 10                # Количество PR
+    include_statistics: true    # Включать статистику
+
+  # Настройки GitHub API (опционально)
+  github:
+    enabled: true
+    # api_token загружается из переменной окружения GITHUB_TOKEN
+
+  # Необходимые Tools
+  required_tools:
+    - "github_mcp"
+
+  # Альтернативные Tools
+  preferred_tools:
+    git_operations:
+      - "github_mcp"
+      - "git_cli"
+
+# Настройки HelpCommandAgent - координатор subagents
+help_command_agent:
+  enabled: true
+  name: "help_command_agent"
+
+  # Ключевые слова для определения типа вопроса
+  keywords:
+    documentation:
+      - "документация"
+      - "documentation"
+      - "как использовать"
+      - "how to"
+      - "пример"
+      - "example"
+      - "api"
+      - "функция"
+      - "function"
+      - "метод"
+      - "method"
+      - "класс"
+      - "class"
+      - "модуль"
+      - "module"
+
+    git:
+      - "репозиторий"
+      - "repository"
+      - "коммит"
+      - "commit"
+      - "ветка"
+      - "branch"
+      - "изменения"
+      - "changes"
+      - "diff"
+      - "статус"
+      - "status"
+      - "git"
+      - "pull request"
+      - "pr"
+
+  # Настройки форматирования ответов
+  formatting:
+    max_docs_results: 3         # Максимум результатов из документации
+    max_git_results: 5          # Максимум результатов от git
+    include_sources: true       # Включать источники
+    include_relevance_score: true # Показывать релевантность
+
+  # Параллельное выполнение
+  parallel_execution:
+    enabled: true               # Запускать агенты параллельно
+    timeout: 30                 # Таймаут в секундах
+
+# Настройки AgentOrchestrator
+orchestrator:
+  # Проверка здоровья
+  health_check:
+    enabled: true
+    interval_seconds: 300       # Каждые 5 минут
+
+  # Обработка ошибок
+  error_handling:
+    max_retries: 2              # Максимум попыток
+    retry_delay_seconds: 5      # Задержка между попытками
+    fallback_enabled: true      # Использовать fallback агенты
+
+  # Логирование
+  logging:
+    log_agent_calls: true       # Логировать вызовы агентов
+    log_tool_calls: true        # Логировать вызовы инструментов
+    log_results: false          # Логировать результаты (может быть много данных)
+
+# Интеграция с DeepSeek Provider
+deepseek_integration:
+  enabled: true
+
+  # Когда использовать subagents
+  trigger_keywords:
+    - "/help"
+    - "помощь"
+    - "help me"
+    - "подскажи"
+
+  # Параметры ответов
+  response:
+    include_agent_info: false   # Показывать какой агент использован
+    format_as_markdown: true    # Форматировать как Markdown
+    max_length: 2000            # Максимальная длина ответа
+
+# Настройки Tools Manager
+tools_manager:
+  # Динамическая замена инструментов
+  dynamic_replacement:
+    enabled: true
+    check_availability: true    # Проверять доступность перед использованием
+
+  # Кеширование результатов
+  caching:
+    enabled: false               # Кешировать результаты Tools
+    ttl_seconds: 300            # Время жизни кеша (5 минут)

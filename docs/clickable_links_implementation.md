@@ -74,7 +74,7 @@ sources_text, inline_keyboard = rag_manager.format_sources_with_telegram_buttons
 
 Формат callback данных: `doc:{file_path}:{chunk_id}:{line_numbers}`
 
-Пример: `doc:/rag_docs/test.md:chunk_0:1-20`
+Пример: `doc:/docs/test.md:chunk_0:1-20`
 
 ## Интеграция с ботом
 

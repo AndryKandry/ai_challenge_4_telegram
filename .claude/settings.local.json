@@ -13,7 +13,9 @@
       "Bash(python manage_index.py:*)",
       "Bash(curl:*)",
       "Bash(python test_rag_integration.py:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(rm:*)",
+      "Bash(tree:*)"
     ],
     "deny": [],
     "ask": []

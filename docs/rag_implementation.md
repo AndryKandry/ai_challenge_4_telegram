@@ -37,7 +37,7 @@
    - Батчевая обработка и retry-логика
 
 3. **DocumentIndexer** (`src/embeddings/indexer.py`)
-   - Индексирует документы из директории `rag_docs/`
+   - Индексирует документы из директории `docs/`
    - Отслеживает изменения файлов по SHA-256 хэшу
    - Сохраняет индекс в JSON формате
 
@@ -77,10 +77,10 @@ pip install -r requirements.txt
 
 ### 3. Добавление документов
 
-Поместите ваши документы (`.md` или `.txt`) в директорию `rag_docs/`:
+Поместите ваши документы (`.md` или `.txt`) в директорию `docs/`:
 
 ```
-rag_docs/
+docs/
 ├── documentation/
 │   └── bot_overview.md
 ├── guides/
@@ -128,7 +128,7 @@ indexer = DocumentIndexer(
 
 # Индексация
 stats = indexer.index_directory(
-    directory="rag_docs",
+    directory="docs",
     extensions=['.md', '.txt'],
     recursive=True
 )
@@ -206,7 +206,7 @@ if result['used_rag']:
 ### Индексация
 
 ```bash
-# Индексация из rag_docs (по умолчанию)
+# Индексация из docs (по умолчанию)
 python manage_index.py index
 
 # Индексация из другой директории
@@ -279,7 +279,7 @@ chunking:
 
 # Настройки индексации
 indexing:
-  default_docs_dir: "rag_docs"
+  default_docs_dir: "docs"
   index_path: "data/embeddings/document_index.json"
   include_extensions:
     - ".md"
@@ -358,7 +358,7 @@ python manage_index.py index
 
 ### Добавление новых документов
 
-1. Поместите документы в `rag_docs/`
+1. Поместите документы в `docs/`
 2. Запустите индексацию:
    ```bash
    python manage_index.py index

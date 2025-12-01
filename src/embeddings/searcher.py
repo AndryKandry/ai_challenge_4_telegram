@@ -42,7 +42,7 @@ class SemanticSearcher:
         self,
         query: str,
         top_k: int = 5,
-        min_similarity: float = 0.5,
+        min_similarity: float = 0.1,
         filter_by_type: Optional[List[str]] = None
     ) -> List[dict]:
         """
@@ -99,13 +99,21 @@ class SemanticSearcher:
 
             # Проверяем минимальный порог
             if similarity >= min_similarity:
+                # Копируем метаданные и добавляем source_file
+                metadata = chunk.get('metadata', {}).copy()
+                metadata['source_file'] = chunk.get('source_file', 'unknown')
+                
                 similarities.append({
                     'chunk_id': chunk.get('chunk_id'),
                     'text': chunk.get('text'),
-                    'source_file': chunk.get('source_file'),
+                    'source_file': chunk.get('source_file', 'unknown'),
                     'similarity_score': float(similarity),
-                    'metadata': chunk.get('metadata', {})
+                    'metadata': metadata
                 })
+                
+                # Отладочный вывод для первых 3 результатов
+                if len(similarities) <= 3:
+                    logger.debug(f"Found similarity {similarity:.4f} for chunk {chunk.get('chunk_id')}")
 
         # Сортируем по убыванию схожести
         similarities.sort(key=lambda x: x['similarity_score'], reverse=True)
@@ -203,7 +211,7 @@ class SemanticSearcher:
                 # Кэш устарел, удаляем
                 del self.query_cache[query]
 
-        # Генерируем новый эмбеддинг
+        # Генерируем новый эмбеддинг (embed_text не асинхронный!)
         try:
             embedding = self.embedder.embed_text(query)
 

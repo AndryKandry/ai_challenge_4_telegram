@@ -32,7 +32,7 @@ MCP Filesystem сервер предоставляет инструменты д
            ▼
 ┌─────────────────────┐
 │  Файловая система   │
-│  (rag_docs/)        │
+│  (docs/)        │
 └─────────────────────┘
 ```
 
@@ -63,7 +63,7 @@ async def list_directory(path: str = ".") -> str:
 
 **Пример ответа:**
 ```
-📂 Содержимое директории: /path/to/rag_docs
+📂 Содержимое директории: /path/to/docs
 Всего элементов: 15
 ================================================================================
 Тип        | Размер     | Дата изменения      | Имя
@@ -430,7 +430,7 @@ from src.integrations.mcp_link_generator import MCPLinkGenerator
 # Создание генератора
 link_generator = MCPLinkGenerator(
     mcp_server_url="http://localhost:8003",
-    base_path="/path/to/rag_docs"  # опционально
+    base_path="/path/to/docs"  # опционально
 )
 
 # Генерация ссылки
@@ -620,7 +620,7 @@ metadata = {
 ### 1. Организация документов
 
 ```
-rag_docs/
+docs/
 ├── documentation/
 │   ├── architecture.md
 │   └── api_reference.md

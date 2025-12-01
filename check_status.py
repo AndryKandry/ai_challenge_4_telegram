@@ -119,7 +119,7 @@ def check_documents():
     print("ПРОВЕРКА ДОКУМЕНТОВ")
     print("=" * 60)
 
-    docs_dir = Path("rag_docs")
+    docs_dir = Path("docs")
 
     if not docs_dir.exists():
         print(f"❌ Директория документов не найдена: {docs_dir}")

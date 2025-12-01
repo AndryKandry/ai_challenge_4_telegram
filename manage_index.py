@@ -55,7 +55,7 @@ def cli():
 
 
 @cli.command()
-@click.option('--source', default='rag_docs', help='Директория с документами')
+@click.option('--source', default='docs', help='Директория с документами')
 @click.option('--config', default='config/embeddings_config.yaml', help='Файл конфигурации')
 @click.option('--recursive/--no-recursive', default=True, help='Рекурсивное сканирование')
 @click.option('--verbose', is_flag=True, help='Подробный вывод')
